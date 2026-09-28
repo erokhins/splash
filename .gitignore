@@ -8,3 +8,6 @@ __pycache__/
 .ruff_cache/
 dist/
 install/download-token
+.idea/
+.cache/
+.build-arm64/
