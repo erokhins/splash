@@ -70,6 +70,10 @@ void requireLoadedModel(const model::ModelPackage &package);
 
 struct RuntimeResourcesConfig {
   kv::Format kvFormat = kv::Format::Int8;
+  // The prefill projections that run on int8 activations where the GPU
+  // supports them (--prefill-activations int8), as ops::Int8PrefillRole bits;
+  // changes prefill numerics slightly.
+  uint8_t int8PrefillRoles = 0;
   std::filesystem::path metallibPath;
   std::filesystem::path modelRoot;
   model::ModelDescriptor model;

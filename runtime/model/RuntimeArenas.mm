@@ -81,6 +81,13 @@ prefillTensorBytes(const RuntimeGeometry &geometry,
   put(PrefillTensor::DownProjectionSums,
       bytesFor<float>(uint64_t{kPrefillRows} *
                       geometry.projectionSumsWidth()));
+  if (operators.linear().prefillInt8()) {
+    // One int8 row per prefill row of the widest projection input.
+    put(PrefillTensor::QuantizedActivations,
+        ops::int8ActivationBytes(geometry.projectionSumsWidth() * kQ4GroupElements, kPrefillRows));
+    put(PrefillTensor::ActivationScales,
+        bytesFor<float>(uint64_t{kPrefillRows} * geometry.projectionSumsWidth()));
+  }
   // Three rotary axes per row (Qwen3.5 M-RoPE); text rows repeat one value.
   put(PrefillTensor::TargetPositions,
       bytesFor<uint32_t>(uint64_t{kPrefillRows} * 3));

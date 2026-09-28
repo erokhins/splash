@@ -1917,6 +1917,13 @@ def parse_args(argv=None):
         help="target KV cache storage (default: int8); bf16 uses more memory",
     )
     parser.add_argument(
+        "--prefill-activations",
+        type=_parse_prefill_activations,
+        default=os.environ.get("SPLASH_PREFILL_ACTIVATIONS", "bf16"),
+        help="prefill projection activations (default: bf16); int8 runs the "
+        "M5 neural accelerators' int8 matmul, faster with slightly different numerics",
+    )
+    parser.add_argument(
         "--max-request-size",
         type=_parse_request_size,
         default=DEFAULT_MAX_REQUEST_BYTES,
@@ -1968,6 +1975,15 @@ def parse_args(argv=None):
     return args
 
 
+def _parse_prefill_activations(value):
+    # bf16, int8, or (for measurement) the routed projection roles.
+    roles = {"ffn", "mixer-output", "mixer-input"}
+    if value in ("bf16", "int8") or (value and set(value.split(",")) <= roles):
+        return value
+    raise argparse.ArgumentTypeError(
+        "expected bf16, int8, or a list of ffn,mixer-output,mixer-input")
+
+
 def _native_command(args):
     command = [
         args.binary,
@@ -1981,6 +1997,8 @@ def _native_command(args):
         command.append(str(args.max_cache_disk))
     if args.kv_format != "int8":
         command.extend(("--kv-format", args.kv_format))
+    if args.prefill_activations != "bf16":
+        command.extend(("--prefill-activations", args.prefill_activations))
     return command
 
 

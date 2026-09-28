@@ -45,6 +45,13 @@ public:
                                metal::MetalBuffer output,
                                metal::MetalBuffer sums, uint32_t width,
                                uint32_t rows);
+
+  // Fused RMS normalization plus int8 quantization for an affine prefill
+  // projection on int8 activations (Linear::prefillInt8): writes only the
+  // int8 form of the normalized rows.
+  static void addRmsWithInt8(metal::CommandGraph &graph, metal::MetalBuffer input,
+                             const NormWeights &weight, Int8Activations activations,
+                             uint32_t width, uint32_t rows);
 };
 
 } // namespace splash::ops

@@ -355,7 +355,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
 
   // One selection owner is used both before allocation and during encoding.
   // The engine lends it to model execution without inspecting kernel choices.
-  ops::ExecutionPlans operators(device);
+  ops::ExecutionPlans operators(device, {.int8PrefillRoles = config.int8PrefillRoles});
   model::ModelMemoryPlan modelMemoryPlan;
   // The disk tier's KV staging is Metal memory the governor charges beside
   // the weights, so the plan sets it aside before it sizes the KV pool.

@@ -1,0 +1,15 @@
+warming up with warm_up.json...
+warm_up.json: cached=0/14604 (0%) | prefill_new=14604tok @1295tok/s (11.3s) | not counted in means
+00.json: cached=14592/18559 (79%) | prefill_new=3967tok @1084tok/s | decode=243tok @60.7tok/s | accept=31% (3.12tok/round)
+01.json: cached=18528/18704 (99%) | prefill_new=176tok @546tok/s | decode=374tok @49.9tok/s | accept=23% (2.60tok/round)
+02.json: cached=18688/19095 (98%) | prefill_new=407tok @765tok/s | decode=198tok @53.6tok/s | accept=26% (2.79tok/round)
+03.json: cached=19072/19129 (100%) | prefill_new=57tok @244tok/s | decode=207tok @57.9tok/s | accept=29% (3.00tok/round)
+04.json: cached=19104/21574 (89%) | prefill_new=2470tok @927tok/s | decode=32768tok @81.6tok/s | accept=51% (4.56tok/round)
+05.json: cached=21568/23799 (91%) | prefill_new=2231tok @904tok/s | decode=100tok @87.3tok/s | accept=50% (4.35tok/round)
+06.json: cached=23776/26197 (91%) | prefill_new=2421tok @920tok/s | decode=274tok @59.7tok/s | accept=31% (3.15tok/round)
+07.json: cached=26176/26994 (97%) | prefill_new=818tok @782tok/s | decode=565tok @58.5tok/s | accept=31% (3.16tok/round)
+08.json: cached=26976/27626 (98%) | prefill_new=650tok @761tok/s | decode=880tok @51.8tok/s | accept=26% (2.80tok/round)
+09.json: cached=27616/30322 (91%) | prefill_new=2706tok @898tok/s | decode=32768tok @114.4tok/s | accept=77% (6.38tok/round)
+10.json: cached=30304/31750 (95%) | prefill_new=1446tok @849tok/s | decode=1627tok @61.3tok/s | accept=34% (3.34tok/round)
+------------------------------------------------------------------------
+mean over 11 requests: KV cached 93% (246400/263749) | prefill 907tok/s over 17349 new tokens (19.1s) | generation 91.4tok/s (70004 tokens, 765.3s) | accept 58% of drafted (5.08tok/round)

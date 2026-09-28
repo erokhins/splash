@@ -233,6 +233,7 @@ ENGINE_CPP_SOURCES := \
 	runtime/ops/KvCopy.cpp \
 	runtime/ops/Linear.cpp \
 	runtime/ops/LinearGguf.cpp \
+	runtime/ops/LinearInt8.cpp \
 	runtime/ops/MoE.cpp \
 	runtime/ops/Normalization.cpp \
 	runtime/ops/PagedAttention.cpp \

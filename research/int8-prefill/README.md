@@ -364,3 +364,127 @@ mlx-vlm shipped (+29% on a GDN-heavy profile).
    rate via `./bench.sh` (baseline: 29% of drafted, 3.04 tok/round), and a
    long cold prompt for tok/s. Start with MLP projections only, add
    attention/GDN projections if clean.
+
+---
+
+## 10. Implementation (2026-09-28, later the same day)
+
+Shipped on this branch behind `--prefill-activations int8` (server and
+`serve-native`), Apple10 only, off by default. Files:
+`runtime/metal/kernels/prefill/linear_q4_int8.metal`,
+`runtime/ops/LinearInt8.cpp` (+ `Linear.hpp`, `Normalization.*`,
+`ExecutionPlans.*`), model wiring in `runtime/model/QwenTarget.cpp`, arena
+tensors in `RuntimeArenas.*`, option plumbing in `main.mm`,
+`RuntimeResources.*`, `server/server.py`; test
+`dev/tests/engine/q4_prefill_int8_metal_test.mm`; `decode-profile` and
+`q4_prefill_profile` know the kernels.
+
+### Kernel: register-operand int8 x int8, not int8 x int4b
+
+jundot/omlx#3548 (merged 2026-09-11) pointed at a better kernel than §4's:
+`int8 x int8 -> int32` per simdgroup (16 x 32 x 16 `matmul2d` with
+`execution_simdgroup`), the **weight operand unpacked from the packed Q4
+nibbles into the right-input cooperative tensor in registers** (codes 0..15
+as int8), int32 accumulation over the four steps of a 64-group, then the
+affine epilogue in fp32. Consequences:
+
+- **No weight format change.** The kernel reads the same bytes decode reads;
+  no signed-code fold, no bias' plane, no in-memory copy. The whole feature
+  is additive.
+- The K positions a fragment slot stands for are free, so the activation
+  rows are stored with each 64-group permuted (`16c + 4t + j` holds input
+  `16c + 8(t>>1) + 2j + (t&1)`); a lane's 16 codes are then one 8-byte run of
+  the weight stream and step t is the even/odd nibbles of one word.
+- Measured in the microbenchmark (`i8reg_*` kernels, M=2048, isolated):
+  ffn_up 4.06 ms vs bf16 6.18 (**1.52×**), ffn_down 4.36 vs 6.47, attn_in
+  3.58 vs 5.21, gdn_in 3.89 vs 6.04, mixer_out 1.55 vs 2.43; ≈ 90 TOPS. The
+  tile is 32 x 64 per threadgroup (2 simdgroups); 64 x 64 and 128 x 32 are
+  within 5%. The `int8 x int4b` tensor path of §8 stays at 1.29× because of
+  its epilogue; the register path's epilogue is per lane on 32 elements and
+  is cheap.
+- Random operand data gives the same ratio as constant fills (1.57×).
+- **Pitfall:** the first production port ran at 6.5 ms (no gain). The
+  unrolled loops used `ushort` induction variables; `int` restored 4.2 ms.
+- The compiler drops a `float(bfloat(x))` round trip before an epilogue add,
+  so the kernel rounds once, after the epilogue, explicitly. (The bf16 tiles
+  are written as if they round twice; they may not.)
+
+### Activation quantization: per group, not per row
+
+The first end-to-end run used one scale per row (§4). Prefill was fast, but
+two of the eleven replay requests ran to the 32K token cap in repetitive
+loops and draft acceptance rose to 58% (bf16: 29%); every greedy output
+diverged from bf16 within the first ~10–40 characters. Qwen's post-norm rows
+carry a few enormous outlier channels, so absmax/127 per row leaves the
+other channels a handful of levels. **One scale per 64-input group** (aligned
+with the weight groups, so the epilogue applies `scale[g][n] · s_x[g][m]`)
+confines an outlier to its own group; the producer needs no row-wide pass
+(one simd_max per group) and the bf16 group sums stay unscaled. Synthetic
+test error fell from 4–6% to ≈1% relative RMS; end to end:
+
+| | bf16 (same session) | int8 per row | int8 per group |
+|---|---|---|---|
+| cold 14.6K prompt, tok/s | 744 | 1295 | **1184** |
+| replay mean prefill, tok/s | 577 | 907 | **836** |
+| generated tokens over 11 requests | 4362 | 70004 (two runaways) | 4682 |
+| draft acceptance | 29% | 58% | 31% |
+| greedy outputs identical to bf16 (of 12, 300 tokens) | 12 (control) | 0 | 3 |
+
+(The machine was warmer than for §7's 919 tok/s baseline; compare within a
+column set.) `decode-profile` on the 8K prompt: 9.37 s → 6.10 s (874 → 1344
+tok/s) with the per-row build; the per-group build has one extra multiply
+per element per group.
+
+Greedy outputs over 20–30K-token agent contexts diverge from bf16 in most
+requests (after 23–456 characters); for scale, §11 calibrates this against
+the shipped `--kv-format` difference. The test checks each kernel against a
+double-precision model of its arithmetic within the projection's bf16
+rounding, and bounds the deviation from the bf16 kernels.
+
+## 11. Calibration and routing bisect
+
+All captures: greedy (temperature 0), 300 tokens, the 12 Junie replay
+requests (20–30K-token agent contexts, mostly cached prefixes), compared
+character-wise against the bf16-activation, int8-KV default. bf16 against
+itself is 12/12 identical.
+
+| Variant | identical | agreeing prefix | replay prefill | cold 14.6K |
+|---|---|---|---|---|
+| `--kv-format bf16` (shipped option, bf16 activations) | 4/12 | 45% | – | – |
+| int8 activations, all projections (per group) | 3/12 | 19% | 836 tok/s | 1184 tok/s |
+| int8 activations, `ffn,mixer-output` only | 3/12 | 15% | 810 tok/s | 1108 tok/s |
+| int8 activations, per row (superseded) | 0/12 | 1% | 907 tok/s | 1295 tok/s |
+
+So int8 prefill perturbs generations more than the KV-format switch but in
+the same way (divergence after tens to hundreds of characters, draft
+acceptance and generation lengths unchanged), and leaving the GDN/attention
+input projections on bf16 buys no agreement, so `int8` routes every dense
+projection. The role list stays as a measurement knob.
+
+`decode-profile`, 8K prompt, per-group build: 6.67 s (bf16 9.37 s earlier in
+the day, on a cooler machine; the per-row build measured 6.10 s). The int8
+kernels take 84% of prefill time, the two producers 2.4%. B1 decode: 52 ms
+per cycle, as before.
+
+Not done: a top-token agreement or perplexity measurement against bf16 on a
+fixed text set (the tooling in `docs/performance.md` is not in this
+checkout), the 35B MoE model (its dense mixer projections take the path; not
+run), the draft context projections (bf16), and tile selection per shape
+(64 x 64 / 128 x 32 were within 5% in the microbenchmark).
+
+`make benchmark-prefill` rows at 2048 rows (per-group build, warm machine,
+constant fills; `out/q4_prefill_profile_int8.txt`): the bf16 Apple10 tile
+(`n128_sg4`) against the int8 kernel and its producer.
+
+| shape | bf16 sums + projection, ms | int8 quantize + projection, ms | ratio |
+|---|---|---|---|
+| ffn_up 5120→17408 | 0.10 + 6.25 | 0.05 + 4.49 | 1.40 |
+| ffn_up_silu | 0.10 + 6.37 | 0.05 + 4.68 | 1.37 |
+| ffn_down_residual 17408→5120 | 0.33 + 6.61 | 0.19 + 5.33 | 1.26 |
+| gdn_input 5120→16640 | 0.10 + 5.94 | 0.05 + 4.29 | 1.39 |
+| attention_input 5120→14336 | 0.10 + 5.00 | 0.05 + 3.80 | 1.31 |
+| mixer_output_residual 6144→5120 | 0.12 + 2.19 | 0.07 + 1.68 | 1.32 |
+
+The per-group producer is a single pass and cheaper than the bf16 sums
+kernel. The K=17408 down projection gains least; a 64 x 32 or 128 x 32 tile
+for wide-K shapes is the next thing to try.

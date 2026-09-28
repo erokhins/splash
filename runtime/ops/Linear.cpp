@@ -398,9 +398,12 @@ std::optional<LinearConfig> apple10OneLaneConfig(LinearWorkload w, uint32_t core
 
 } // namespace
 
-Linear::Linear(const DeviceCapabilities &device) noexcept
+// int8 prefill needs the Apple10 neural accelerators' int8 matmul; Apple9
+// has no int8 rate advantage, so the request is ignored there.
+Linear::Linear(const DeviceCapabilities &device, uint8_t int8PrefillRoles) noexcept
     : appleGpuFamily_(device.appleGpuFamily),
-      gpuCores_(device.gpuCoreCount ? device.gpuCoreCount : kAssumedGpuCores) {}
+      gpuCores_(device.gpuCoreCount ? device.gpuCoreCount : kAssumedGpuCores),
+      int8PrefillRoles_(device.appleGpuFamily >= 10 ? int8PrefillRoles : 0) {}
 
 uint32_t Linear::decodeStorageRows(uint32_t rows, ProjectionShape shape) const {
   return plan({{shape.outputSize, shape.inputSize}, rows, LinearPhase::Decode, LinearEpilogue::None, shape.layout})

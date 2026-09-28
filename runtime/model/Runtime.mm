@@ -1046,6 +1046,8 @@ struct Runtime::Impl {
     buffers.attentionOutput = p(PrefillTensor::AttentionOutput);
     buffers.projectionSums = p(PrefillTensor::ProjectionSums);
     buffers.downProjectionSums = p(PrefillTensor::DownProjectionSums);
+    buffers.quantized = p(PrefillTensor::QuantizedActivations);
+    buffers.activationScales = p(PrefillTensor::ActivationScales);
     buffers.ropeCos = p(PrefillTensor::RopeCos);
     buffers.ropeSin = p(PrefillTensor::RopeSin);
     buffers.chunkKeys = p(PrefillTensor::ChunkKeys);

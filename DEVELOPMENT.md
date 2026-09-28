@@ -100,6 +100,7 @@ loopback, so use a listener that includes loopback when launching agents locally
 | `--max-context` | Auto | Context limit, up to `256K`, e.g. `100K`. |
 | `--max-cache-disk` | `0` (off) | Session-local SSD cache, e.g. `16G`. See [disk cache](#disk-cache). |
 | `--kv-format` | `int8` | Target KV storage: `int8` or `bf16`. |
+| `--prefill-activations` | `bf16` | Prefill projection activations: `bf16` or `int8`. See [prefill activation precision](#prefill-activation-precision). |
 | `--max-image-pixels` | `4194304` | Maximum resized pixels per image. |
 | `--allowed-host` | No extra names | Additional HTTP Host name, e.g. `mymac.local`; repeatable. |
 | `--api-key` | `SPLASH_API_KEY` or none | Require a bearer token or `x-api-key`. |
@@ -131,6 +132,35 @@ memory, and can be slower at long contexts. Model weights are unchanged.
 Restart to switch formats. Omit `--kv-format` or use `--kv-format int8` for the
 default. The [SSD cache](#disk-cache) supports both formats, preserving their
 stored bytes without further quantization; it does not survive a restart.
+
+### Prefill activation precision
+
+On M5 and later (Apple10 GPUs), prefill can run the affine Q4 projections on
+int8 activations:
+
+```bash
+splash serve --model mlx-community/Qwen3.8-27B-4bit --prefill-activations int8
+```
+
+The neural accelerators multiply int8 at twice their bf16 rate, and the Q4
+projections are about nine tenths of prefill GPU time, so a cold prompt
+prefills about 1.5 times as fast (an 8K prompt on an M5 Max: 874 to 1,344
+tokens per second). Each projection's input rows are quantized to int8 with
+one scale per 64 inputs, aligned with the weight groups (fused into the RMS
+norm where the norm feeds the projection); the weights, decode, verification
+and the draft are unchanged,
+as is memory apart from one int8 activation buffer. The numerics of prefill
+change slightly (the projections' `x·q` term is quantized; the affine bias
+term is not), so cached prefixes and generations can differ from the bf16
+path. It is off by default, ignored on Apple9 GPUs, and applies to affine
+(MLX 4-bit and Splash package) targets; GGUF targets keep their own kernels.
+For measurement, a list of projection roles routes only those:
+`--prefill-activations ffn,mixer-output` leaves the GDN and attention input
+projections (`mixer-input`) on bf16.
+The kernels are in `runtime/metal/kernels/prefill/linear_q4_int8.metal`
+(`Linear::addPrefillInt8*` in `runtime/ops/LinearInt8.cpp`), and
+`dev/tests/engine/q4_prefill_int8_metal_test.mm` checks them against a CPU
+model of their arithmetic.
 
 ## API model aliases
 

@@ -257,35 +257,69 @@ metal::MetalBuffer QwenTarget::addPrefill(
   return buffers.hidden[geometry_.layers & 1];
 }
 
+namespace {
+
+// The int8 activation buffers of a prefill step over `sums`.
+ops::Int8Activations int8Activations(const QwenTargetPrefillBuffers &b, metal::MetalBuffer sums) {
+  return {b.quantized, b.activationScales, std::move(sums)};
+}
+
+} // namespace
+
+bool QwenTarget::int8Prefill(const ops::Projection &projection, ops::Int8PrefillRole role) const noexcept {
+  return operators_.linear().prefillInt8(role) && ops::Linear::supportsInt8Prefill(projection);
+}
+
 // An affine prefill projection reads the Q4 input sums of its rows, which the
-// norm writes beside them; a block projection reads none.
+// norm writes beside them (or the int8 rows, scales and sums of the int8
+// path); a block projection reads none.
 void QwenTarget::addPrefillNorm(PrefillStep &step, metal::MetalBuffer input, const ops::NormWeights &norm,
-                                ops::WeightLayout consumer) const {
+                                const ops::Projection &consumer, ops::Int8PrefillRole role) const {
   const QwenTargetPrefillBuffers &b = step.buffers;
-  if (consumer == ops::WeightLayout::Affine64)
+  if (int8Prefill(consumer, role))
+    ops::Normalization::addRmsWithInt8(step.graph, input, norm, int8Activations(b, b.projectionSums),
+                                       geometry_.hiddenSize, step.rows);
+  else if (consumer.layout() == ops::WeightLayout::Affine64)
     ops::Normalization::addRmsWithQ4Sums(step.graph, input, norm, b.normalized, b.projectionSums,
                                          geometry_.hiddenSize, step.rows);
   else
     ops::Normalization::addRms(step.graph, input, norm, b.normalized, geometry_.hiddenSize, step.rows);
 }
 
+void QwenTarget::addPrefillInput(PrefillStep &step, const ops::Projection &projection,
+                                 metal::MetalBuffer output) const {
+  const QwenTargetPrefillBuffers &b = step.buffers;
+  if (int8Prefill(projection, ops::Int8PrefillRole::MixerInput))
+    operators_.linear().addPrefillInt8(step.graph, int8Activations(b, b.projectionSums), projection,
+                                       std::move(output), step.rows);
+  else
+    operators_.linear().addPrefill(step.graph, b.normalized, projection, std::move(output), b.projectionSums,
+                                   step.rows, b.linearScratch);
+}
+
 // The mixer output projection adds the mixer's rows to `input`.
 void QwenTarget::addPrefillOutput(PrefillStep &step, metal::MetalBuffer hidden, const ops::Projection &projection,
                                   metal::MetalBuffer input, metal::MetalBuffer output) const {
   const QwenTargetPrefillBuffers &b = step.buffers;
+  const ops::Linear &linear = operators_.linear();
+  if (int8Prefill(projection, ops::Int8PrefillRole::MixerOutput)) {
+    const ops::Int8Activations activations = int8Activations(b, b.projectionSums);
+    linear.addPrefillQuantize(step.graph, hidden, activations, projection.inputSize, step.rows);
+    linear.addPrefillInt8Residual(step.graph, activations, projection, input, output, step.rows);
+    return;
+  }
   if (projection.layout() == ops::WeightLayout::Affine64)
-    operators_.linear().addPrefillSums(step.graph, hidden, b.projectionSums, projection, step.rows);
-  operators_.linear().addPrefillResidual(step.graph, hidden, projection, input, output, b.projectionSums,
-                                         step.rows, b.linearScratch);
+    linear.addPrefillSums(step.graph, hidden, b.projectionSums, projection, step.rows);
+  linear.addPrefillResidual(step.graph, hidden, projection, input, output, b.projectionSums, step.rows,
+                            b.linearScratch);
 }
 
 metal::MetalBuffer QwenTarget::addPrefillMixer(PrefillStep &step, const QwenGdnWeights &mixer,
                                                const ops::NormWeights &norm, metal::MetalBuffer input) const {
   const QwenTargetPrefillBuffers &b = step.buffers;
   const uint32_t layer = step.gdnLayer++;
-  addPrefillNorm(step, input, norm, mixer.inputProjection.layout());
-  operators_.linear().addPrefill(step.graph, b.normalized, mixer.inputProjection, b.gdnPacked, b.projectionSums,
-                                 step.rows, b.linearScratch);
+  addPrefillNorm(step, input, norm, mixer.inputProjection, ops::Int8PrefillRole::MixerInput);
+  addPrefillInput(step, mixer.inputProjection, b.gdnPacked);
   for (const QwenTargetPrefillSequence &sequence : step.sequences) {
     const auto u16 = [&](const metal::MetalBuffer &buffer, uint32_t width) {
       return rowsOf<uint16_t>(backend_, buffer, sequence.rowBegin, sequence.rows, width);
@@ -311,9 +345,8 @@ metal::MetalBuffer QwenTarget::addPrefillMixer(PrefillStep &step, const QwenAtte
                                                const ops::NormWeights &norm, metal::MetalBuffer input) const {
   const QwenTargetPrefillBuffers &b = step.buffers;
   const uint32_t layer = step.attentionLayer++;
-  addPrefillNorm(step, input, norm, mixer.inputProjection.layout());
-  operators_.linear().addPrefill(step.graph, b.normalized, mixer.inputProjection, b.fullPacked, b.projectionSums,
-                                 step.rows, b.linearScratch);
+  addPrefillNorm(step, input, norm, mixer.inputProjection, ops::Int8PrefillRole::MixerInput);
+  addPrefillInput(step, mixer.inputProjection, b.fullPacked);
   for (const QwenTargetPrefillSequence &sequence : step.sequences) {
     const auto u16 = [&](const metal::MetalBuffer &buffer, uint32_t width) {
       return rowsOf<uint16_t>(backend_, buffer, sequence.rowBegin, sequence.rows, width);
@@ -353,7 +386,29 @@ void QwenTarget::addPrefillFfn(PrefillStep &step, const Qwen3_8LayerWeights &lay
                                metal::MetalBuffer output) const {
   const QwenTargetPrefillBuffers &b = step.buffers;
   const ops::Linear &linear = operators_.linear();
-  addPrefillNorm(step, residual, layer.postAttentionNorm, layer.gateProjection.layout());
+  // The int8 FFN is all or nothing: its up projection writes no down sums,
+  // and the down input is quantized from the bf16 intermediate rows instead.
+  constexpr auto role = ops::Int8PrefillRole::Ffn;
+  if (int8Prefill(layer.gateProjection, role) && int8Prefill(layer.upProjection, role) &&
+      int8Prefill(layer.downProjection, role)) {
+    const ops::Int8Activations normalized = int8Activations(b, b.projectionSums);
+    const ops::Int8Activations intermediate = int8Activations(b, b.downProjectionSums);
+    addPrefillNorm(step, residual, layer.postAttentionNorm, layer.gateProjection, role);
+    linear.addPrefillInt8(step.graph, normalized, layer.gateProjection, b.denseGateScratch, step.rows);
+    linear.addPrefillInt8UpWithGate(step.graph, normalized, layer.upProjection, b.denseGateScratch,
+                                    b.denseIntermediate, step.rows);
+    linear.addPrefillQuantize(step.graph, b.denseIntermediate, intermediate, layer.downProjection.inputSize,
+                              step.rows);
+    linear.addPrefillInt8Residual(step.graph, intermediate, layer.downProjection, residual, output, step.rows);
+    return;
+  }
+  // A norm that quantized for the gate would leave no bf16 rows for the up
+  // projection's sums; the bf16 FFN normalizes for its bf16 gate.
+  if (int8Prefill(layer.gateProjection, role))
+    ops::Normalization::addRmsWithQ4Sums(step.graph, residual, layer.postAttentionNorm, b.normalized,
+                                         b.projectionSums, geometry_.hiddenSize, step.rows);
+  else
+    addPrefillNorm(step, residual, layer.postAttentionNorm, layer.gateProjection, role);
   linear.addPrefill(step.graph, b.normalized, layer.gateProjection, b.denseGateScratch, b.projectionSums,
                     step.rows, b.linearScratch);
   linear.addPrefillUpWithGate(step.graph, b.normalized, layer.upProjection, b.denseGateScratch,

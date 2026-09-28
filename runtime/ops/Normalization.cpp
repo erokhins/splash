@@ -47,4 +47,21 @@ void Normalization::addRmsWithQ4Sums(
             width, {rows, 1, 1});
 }
 
+void Normalization::addRmsWithInt8(metal::CommandGraph &graph, metal::MetalBuffer input,
+                                   const NormWeights &weight, Int8Activations activations,
+                                   uint32_t width, uint32_t rows) {
+  // Only affine (bf16-norm) targets take int8 projections; F32 norms come
+  // from GGUF targets, which run their own kernels.
+  if (weight.float32) throw std::invalid_argument("int8 normalization takes bf16 norm weights");
+  if (!rows || !width || width % 64 || !activations.quantized || !activations.scales || !activations.sums ||
+      activations.quantized.sizeBytes() < int8ActivationBytes(width, rows) ||
+      activations.scales.sizeBytes() < uint64_t{(rows + 31) / 32 * 32} * (width / 64) * 4 ||
+      activations.sums.sizeBytes() < uint64_t{(rows + 31) / 32 * 32} * (width / 64) * 4)
+    throw std::invalid_argument("int8 normalization buffers are below requirement");
+  graph.add(normKernel("prefill_norm_rms_int8", weight, width),
+            {std::move(input), weight.buffer, std::move(activations.quantized), std::move(activations.scales),
+             std::move(activations.sums)},
+            width, {rows, 1, 1});
+}
+
 } // namespace splash::ops

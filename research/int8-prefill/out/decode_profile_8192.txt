@@ -1,0 +1,161 @@
+device Apple M5 Max, 8192 prompt tokens, 3 cycles per width
+
+== prefill 8192 rows: 9368.62 ms fused, 9304.78 ms as 2975 separate dispatches ==
+pipeline                                         count     gpu_ms  share
+prefill_linear_q4_n128_sg4                       518.0   3656.328  39.3%
+prefill_linear_q4_n128_residual_sg4              512.0   2638.406  28.4%
+prefill_linear_q4_n128_up_silu_sums_sg4          256.0   2014.237  21.6%
+prefill_attention_q8_split                        64.0    399.565   4.3%
+prefill_gdn_scan                                 192.0    387.495   4.2%
+prefill_norm_rms_sums32                          513.0     47.026   0.5%
+prefill_gdn_prepare                              192.0     36.490   0.4%
+prefill_gdn_gate                                 192.0     34.650   0.4%
+prefill_linear_q4_sums32                         257.0     33.931   0.4%
+prefill_attention_qkv                             64.0     19.755   0.2%
+prefill_attention_q8_reduce                       64.0     16.548   0.2%
+prefill_attention_gate                            64.0      9.395   0.1%
+prefill_attention_q8_store                        64.0      6.576   0.1%
+capture_target_hidden                              5.0      1.838   0.0%
+decode_linear_q4_n256_paired_sg4_f32               1.0      1.400   0.0%
+embedding_q4_h5120                                 4.0      0.706   0.0%
+prefill_draft_context_kv                           5.0      0.343   0.0%
+rope_build_tables                                  4.0      0.052   0.0%
+decode_sample_argmax_sharded                       1.0      0.018   0.0%
+norm_rms                                           1.0      0.009   0.0%
+prefill_gather_last_hidden_rows8                   1.0      0.004   0.0%
+decode_sample_argmax_reduce                        1.0      0.003   0.0%
+
+B1 decode cycle: median fused gpu 49.72 ms, wall 50.31 ms, 1 command(s) per cycle
+
+== B1 decode cycle: 49.72 ms fused, 50.62 ms as 625 separate dispatches ==
+pipeline                                         count     gpu_ms  share
+decode_linear_q4_n128_residual_paired            128.0     18.692  36.9%
+decode_linear_q4_n256_gate_up                     69.0     13.896  27.5%
+decode_linear_q4_n128_paired                      96.0     10.352  20.5%
+decode_linear_q4_n256_paired_sg4_f32               2.0      2.593   5.1%
+verify_gdn_fused                                  48.0      1.253   2.5%
+verify_attention_q8_split                         16.0      1.204   2.4%
+norm_rms                                         141.0      1.165   2.3%
+verify_gdn_commit                                  1.0      0.591   1.2%
+draft_attention_bf16_split                         5.0      0.204   0.4%
+verify_attention_q8_reduce                        16.0      0.189   0.4%
+verify_attention_q8_store                         16.0      0.086   0.2%
+verify_attention_qkv                              16.0      0.080   0.2%
+draft_conv                                        20.0      0.066   0.1%
+verify_attention_gate                             16.0      0.056   0.1%
+draft_select_top16_sharded                         1.0      0.031   0.1%
+draft_context_kv_commit                            5.0      0.024   0.0%
+draft_attention_bf16_reduce                        5.0      0.024   0.0%
+draft_attention_qkv                                5.0      0.021   0.0%
+decode_sample_argmax_sharded                       1.0      0.019   0.0%
+capture_target_hidden                              5.0      0.018   0.0%
+draft_select_edges                                 1.0      0.013   0.0%
+draft_attention_reorder                            5.0      0.012   0.0%
+draft_select_dflash                                1.0      0.010   0.0%
+embedding_q4_h5120                                 2.0      0.008   0.0%
+decode_accept_dflash                               1.0      0.004   0.0%
+rope_build_tables                                  1.0      0.004   0.0%
+verify_input_tokens                                1.0      0.003   0.0%
+decode_sample_argmax_reduce                        1.0      0.002   0.0%
+
+B2 decode cycle: median fused gpu 59.75 ms, wall 60.35 ms, 1 command(s) per cycle
+
+== B2 decode cycle: 59.75 ms fused, 60.36 ms as 625 separate dispatches ==
+pipeline                                         count     gpu_ms  share
+decode_linear_q4_n128_residual_m16               128.0     24.028  39.8%
+decode_linear_q4_n256_gate_up_m16                 69.0     14.481  24.0%
+decode_linear_q4_n128_m16                         96.0     11.191  18.5%
+decode_linear_q4_n128_m16_f32                      2.0      2.830   4.7%
+verify_attention_q8_split                         16.0      2.538   4.2%
+verify_gdn_fused                                  48.0      1.670   2.8%
+norm_rms                                         141.0      1.244   2.1%
+verify_gdn_commit                                  1.0      1.157   1.9%
+verify_attention_q8_reduce                        16.0      0.350   0.6%
+draft_attention_bf16_split                         5.0      0.289   0.5%
+verify_attention_qkv                              16.0      0.097   0.2%
+verify_attention_q8_store                         16.0      0.090   0.1%
+draft_conv                                        20.0      0.083   0.1%
+verify_attention_gate                             16.0      0.072   0.1%
+draft_select_top16_sharded                         1.0      0.066   0.1%
+draft_attention_qkv                                5.0      0.028   0.0%
+decode_sample_argmax_sharded                       1.0      0.025   0.0%
+draft_attention_bf16_reduce                        5.0      0.024   0.0%
+capture_target_hidden                              5.0      0.023   0.0%
+draft_context_kv_commit                            5.0      0.020   0.0%
+draft_select_edges                                 1.0      0.014   0.0%
+draft_attention_reorder                            5.0      0.014   0.0%
+embedding_q4_h5120                                 2.0      0.011   0.0%
+draft_select_dflash                                1.0      0.010   0.0%
+decode_accept_dflash                               1.0      0.003   0.0%
+rope_build_tables                                  1.0      0.003   0.0%
+verify_input_tokens                                1.0      0.003   0.0%
+decode_sample_argmax_reduce                        1.0      0.002   0.0%
+
+B3 decode cycle: median fused gpu 88.89 ms, wall 89.48 ms, 1 command(s) per cycle
+
+== B3 decode cycle: 88.89 ms fused, 89.64 ms as 694 separate dispatches ==
+pipeline                                         count     gpu_ms  share
+decode_linear_q4_n128_residual_m24               128.0     38.653  43.1%
+decode_linear_q4_n128_m24_sg4                     74.0     11.168  12.5%
+decode_linear_q4_n256_up_silu_m24                 69.0     10.738  12.0%
+decode_linear_q4_n256_m24                         69.0     10.651  11.9%
+decode_linear_q4_n128_m24                         22.0      4.787   5.3%
+decode_linear_q4_n128_m24_sg4_f32                  2.0      3.426   3.8%
+verify_attention_q8_split                         16.0      3.402   3.8%
+verify_gdn_fused                                  48.0      2.272   2.5%
+verify_gdn_commit                                  1.0      1.756   2.0%
+norm_rms                                         141.0      1.158   1.3%
+verify_attention_q8_reduce                        16.0      0.491   0.5%
+draft_attention_bf16_split                         5.0      0.439   0.5%
+verify_attention_qkv                              16.0      0.128   0.1%
+verify_attention_q8_store                         16.0      0.094   0.1%
+draft_select_top16_sharded                         1.0      0.090   0.1%
+draft_conv                                        20.0      0.090   0.1%
+verify_attention_gate                             16.0      0.075   0.1%
+decode_sample_argmax_sharded                       1.0      0.048   0.1%
+draft_attention_qkv                                5.0      0.033   0.0%
+capture_target_hidden                              5.0      0.033   0.0%
+draft_attention_bf16_reduce                        5.0      0.025   0.0%
+draft_context_kv_commit                            5.0      0.020   0.0%
+draft_attention_reorder                            5.0      0.014   0.0%
+draft_select_edges                                 1.0      0.014   0.0%
+embedding_q4_h5120                                 2.0      0.013   0.0%
+draft_select_dflash                                1.0      0.010   0.0%
+rope_build_tables                                  1.0      0.004   0.0%
+decode_accept_dflash                               1.0      0.004   0.0%
+verify_input_tokens                                1.0      0.003   0.0%
+decode_sample_argmax_reduce                        1.0      0.002   0.0%
+
+B4 decode cycle: median fused gpu 88.96 ms, wall 89.59 ms, 1 command(s) per cycle
+
+== B4 decode cycle: 88.96 ms fused, 89.29 ms as 694 separate dispatches ==
+pipeline                                         count     gpu_ms  share
+decode_linear_q4_n128_residual_m32               128.0     32.876  36.8%
+decode_linear_q4_n128_m32                         96.0     17.815  20.0%
+decode_linear_q4_n256_up_silu_m32                 69.0     11.118  12.5%
+decode_linear_q4_n256_m32                         69.0     10.982  12.3%
+verify_attention_q8_split                         16.0      4.323   4.8%
+decode_linear_q4_n256_m32_f32                      2.0      3.652   4.1%
+verify_gdn_fused                                  48.0      2.868   3.2%
+verify_gdn_commit                                  1.0      2.316   2.6%
+norm_rms                                         141.0      1.197   1.3%
+verify_attention_q8_reduce                        16.0      0.728   0.8%
+draft_attention_bf16_split                         5.0      0.548   0.6%
+verify_attention_qkv                              16.0      0.152   0.2%
+draft_attention_qkv                                5.0      0.118   0.1%
+draft_select_top16_sharded                         1.0      0.109   0.1%
+verify_attention_q8_store                         16.0      0.095   0.1%
+draft_conv                                        20.0      0.091   0.1%
+verify_attention_gate                             16.0      0.088   0.1%
+decode_sample_argmax_sharded                       1.0      0.056   0.1%
+capture_target_hidden                              5.0      0.038   0.0%
+draft_attention_bf16_reduce                        5.0      0.030   0.0%
+draft_context_kv_commit                            5.0      0.022   0.0%
+embedding_q4_h5120                                 2.0      0.016   0.0%
+draft_attention_reorder                            5.0      0.015   0.0%
+draft_select_edges                                 1.0      0.014   0.0%
+draft_select_dflash                                1.0      0.011   0.0%
+decode_accept_dflash                               1.0      0.004   0.0%
+rope_build_tables                                  1.0      0.003   0.0%
+verify_input_tokens                                1.0      0.003   0.0%
+decode_sample_argmax_reduce                        1.0      0.002   0.0%

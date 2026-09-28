@@ -66,6 +66,26 @@ the 27B (2.7–4.6× against its MTP). Prefilling a 2,048-token chunk, it runs
 at 559 tok/s against 374 on the 27B and 3,662 against 1,968 on the 35B on
 the M5 Pro, and at 245 against 193 and 1,814 against 1,575 on the M3 Max.
 
+## INT8 prefill activations on M5
+
+`--prefill-activations int8` runs the affine Q4 prefill projections on int8
+activations through the M5 neural accelerators' int8 matmul, which is twice
+their bf16 rate; the projections are about nine tenths of prefill GPU time
+([details](../DEVELOPMENT.md#prefill-activation-precision)). Measured on an
+M5 Max (40-core GPU, 128 GB) with the Qwen3.8-27B blend package, back to
+back in one session:
+
+| Prefill | bf16 activations | int8 activations |
+| --- | ---: | ---: |
+| Cold 14.6K-token prompt | 744 tok/s | 1,184 tok/s (1.6×) |
+| Junie session replay, mean over 11 requests (93% cached) | 577 tok/s | 836 tok/s (1.4×) |
+
+Decode, the draft and memory are unchanged. Prefill numerics change: each
+projection input is quantized to int8 with one scale per 64 inputs, so
+greedy generations over long contexts can diverge from the bf16 path, while
+draft acceptance stays the same (31% against 29% of drafted tokens on the
+replay). It is off by default and needs an Apple10 GPU; Apple9 ignores it.
+
 ## Smaller GGUFs on 24 GB Macs
 
 Measured on a 24 GB M6 (12-core GPU), with each model's DFlash2 draft:

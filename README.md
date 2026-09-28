@@ -90,6 +90,7 @@ window. To set your own limits or cache options, add these to `splash serve`:
 | `--max-context 100K` | Set the context limit. |
 | `--language-only` | Skip vision; serve text only. |
 | `--kv-format bf16` | Use BF16 KV cache. Default: 8-bit (INT8). |
+| `--prefill-activations int8` | Prefill about 1.5× faster on M5 and later, with slightly different numerics. Default: bf16. |
 | `--max-cache-disk 16G` | Offload KV cache and GDN states to SSD as needed. Off by default. |
 
 On a Mac you also use for other work, `--max-memory` leaves room for other

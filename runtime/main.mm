@@ -52,6 +52,7 @@ struct NativeArguments final {
   uint64_t maxMemoryBytes = 0;
   uint64_t maxCacheDiskBytes = 0;
   kv::Format kvFormat = kv::Format::Int8;
+  uint8_t int8PrefillRoles = 0;
 };
 
 // One observer spans bootstrap and serving. The dispatch queue only records
@@ -186,18 +187,44 @@ NativeArguments parseArguments(int argc, char **argv) {
   }
   NativeArguments result;
   int next = 6;
-  if (next < argc && std::string_view(argv[next]) != "--kv-format") {
+  const auto isOption = [](std::string_view argument) { return argument.starts_with("--"); };
+  if (next < argc && !isOption(argv[next])) {
     const std::string_view quota(argv[next++]);
     if (quota != "0" && !parsePositive(quota, result.maxCacheDiskBytes))
       throw UsageError("MAX_CACHE_DISK_BYTES must be a nonnegative integer");
   }
-  if (next < argc) {
-    if (argc - next != 2 || std::string_view(argv[next]) != "--kv-format")
-      throw UsageError("expected --kv-format int8 or bf16");
-    const std::string_view format(argv[next + 1]);
-    if (format != "int8" && format != "bf16")
-      throw UsageError("--kv-format requires int8 or bf16");
-    result.kvFormat = format == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
+  while (next < argc) {
+    const std::string_view option(argv[next]);
+    if (next + 1 >= argc)
+      throw UsageError("expected --kv-format int8|bf16 or --prefill-activations bf16|int8");
+    const std::string_view value(argv[next + 1]);
+    if (option == "--kv-format") {
+      if (value != "int8" && value != "bf16")
+        throw UsageError("--kv-format requires int8 or bf16");
+      result.kvFormat = value == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
+    } else if (option == "--prefill-activations") {
+      // int8 routes every dense projection; a role list (ffn, mixer-output,
+      // mixer-input) narrows it, for measurement.
+      if (value == "bf16") result.int8PrefillRoles = 0;
+      else if (value == "int8") result.int8PrefillRoles = ops::kAllInt8PrefillRoles;
+      else {
+        std::string_view rest = value;
+        while (!rest.empty()) {
+          const size_t comma = rest.find(',');
+          const std::string_view role = rest.substr(0, comma);
+          if (role == "ffn") result.int8PrefillRoles |= static_cast<uint8_t>(ops::Int8PrefillRole::Ffn);
+          else if (role == "mixer-output")
+            result.int8PrefillRoles |= static_cast<uint8_t>(ops::Int8PrefillRole::MixerOutput);
+          else if (role == "mixer-input")
+            result.int8PrefillRoles |= static_cast<uint8_t>(ops::Int8PrefillRole::MixerInput);
+          else throw UsageError("--prefill-activations requires bf16, int8 or a list of ffn,mixer-output,mixer-input");
+          rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
+        }
+      }
+    } else {
+      throw UsageError("expected --kv-format int8|bf16 or --prefill-activations bf16|int8");
+    }
+    next += 2;
   }
   result.modelRoot = requireModelRoot(argv[2], argv[3]);
   result.model = model::inspectModelPackage(result.modelRoot);
@@ -246,6 +273,7 @@ bootstrapConfig(const NativeArguments &arguments) {
   config.resources.maximumMemoryBytes = arguments.maxMemoryBytes;
   config.resources.maximumCacheDiskBytes = arguments.maxCacheDiskBytes;
   config.resources.kvFormat = arguments.kvFormat;
+  config.resources.int8PrefillRoles = arguments.int8PrefillRoles;
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engineInstanceId = engineInstanceId();
   config.nativeLoop.maskWordsPerToken = maskWordsPerToken;

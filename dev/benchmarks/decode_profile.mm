@@ -1,6 +1,7 @@
 // Per-kernel GPU time attribution for the production executor.
 //
 //   decode-profile METALLIB MODEL_ROOT [--prompt-tokens N] [--cycles K] [--kv-format int8|bf16]
+//                  [--prefill-activations bf16|int8]
 //
 // Drives the real model runtime with Metal dispatch profiling enabled, so
 // every dispatch of a packed prefill command and B1 through B4 DFlash cycles
@@ -190,12 +191,14 @@ int main(int argc, char **argv) {
     try {
       if (argc < 3) {
         std::cerr << "usage: decode-profile METALLIB MODEL_ROOT "
-                     "[--prompt-tokens N] [--cycles K] [--kv-format int8|bf16]\n";
+                     "[--prompt-tokens N] [--cycles K] [--kv-format int8|bf16] "
+                     "[--prefill-activations bf16|int8]\n";
         return 2;
       }
       uint32_t promptTokens = 512;
       uint32_t cycles = 4;
       kv::Format format = kv::Format::Int8;
+      bool int8Prefill = false;
       for (int index = 3; index < argc; index += 2) {
         const std::string_view option(argv[index]);
         if (index + 1 >= argc)
@@ -209,6 +212,11 @@ int main(int argc, char **argv) {
           if (value != "int8" && value != "bf16")
             throw std::invalid_argument("--kv-format takes int8 or bf16");
           format = value == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
+        } else if (option == "--prefill-activations") {
+          const std::string_view value(argv[index + 1]);
+          if (value != "int8" && value != "bf16")
+            throw std::invalid_argument("--prefill-activations takes bf16 or int8");
+          int8Prefill = value == "int8";
         } else
           throw std::invalid_argument("unknown option");
       }
@@ -216,7 +224,10 @@ int main(int argc, char **argv) {
       metal::MetalBackend backend(argv[1]);
       model::ModelPackage model = model::loadModelPackage(
           backend, std::filesystem::path(argv[2]));
-      ops::ExecutionPlans operators(backend.capabilities());
+      ops::ExecutionPlans operators(backend.capabilities(),
+                                    {.int8PrefillRoles = int8Prefill ? ops::kAllInt8PrefillRoles : uint8_t{0}});
+      if (int8Prefill && !operators.linear().prefillInt8())
+        std::printf("note: int8 prefill activations need an Apple10 GPU; running bf16\n");
       model::ModelMemoryPlan executorPlan =
           model::plannedRuntimeMemory(backend.capabilities(), model, operators, format);
 

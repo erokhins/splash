@@ -71,8 +71,8 @@ void include(Workspace &bound, const Workspace &required,
 
 } // namespace
 
-ExecutionPlans::ExecutionPlans(const DeviceCapabilities &device)
-    : linear_(device), baselineLinear_(device),
+ExecutionPlans::ExecutionPlans(const DeviceCapabilities &device, ExecutionOptions options)
+    : linear_(device, options.int8PrefillRoles), baselineLinear_(device, options.int8PrefillRoles),
       moeRouteWideRows_(moeRouteWideRows(device.gpuCoreCount)),
       moeDecodeSimdgroups_(moeDecodeSimdgroups(device.appleGpuFamily)),
       appleGpuFamily_(device.appleGpuFamily) {}

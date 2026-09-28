@@ -203,6 +203,29 @@ struct LinearBuffers final {
   PreparedInput prepared{};
 };
 
+// The int8 activations of an affine prefill projection (Apple10,
+// kernels/prefill/linear_q4_int8.metal): symmetric int8 rows of
+// [storage rows][K] in the kernel's permuted group order, and per 64-input
+// group of each row its fp32 activation scale and the fp32 sum of its bf16
+// inputs, both in the prefill sums layout. Linear::addPrefillQuantize and
+// Normalization::addRmsWithInt8 write them.
+struct Int8Activations final {
+  metal::MetalBuffer quantized;
+  metal::MetalBuffer scales;
+  metal::MetalBuffer sums;
+};
+[[nodiscard]] constexpr uint64_t int8ActivationBytes(uint32_t width, uint64_t storageRows) noexcept {
+  return uint64_t{width} * storageRows;
+}
+// The prefill projections that may take int8 activations, by their place in
+// a layer; a bit set of these selects the routed ones.
+enum class Int8PrefillRole : uint8_t {
+  MixerInput = 1,   // the GDN / attention input projection of the normalized rows
+  MixerOutput = 2,  // the mixer's residual output projection
+  Ffn = 4,          // the dense FFN's gate, up and down projections
+};
+constexpr uint8_t kAllInt8PrefillRoles = 7;
+
 struct LinearDispatchStats final {
   uint64_t fusedSourceOperations = 0;
   uint64_t m16Dispatches = 0;
@@ -214,7 +237,19 @@ struct LinearDispatchStats final {
 // Device policy uses GPU family, core count and workload tile counts.
 class Linear final {
 public:
-  explicit Linear(const DeviceCapabilities &device) noexcept;
+  // `int8PrefillRoles` routes the affine prefill projections of those roles
+  // through int8 activations where the device supports it (prefillInt8()).
+  explicit Linear(const DeviceCapabilities &device, uint8_t int8PrefillRoles = 0) noexcept;
+  // Whether any (or the role's) affine prefill projections take int8
+  // activations: requested and an Apple10 GPU, whose neural accelerators run
+  // int8 at twice the bf16 rate.
+  [[nodiscard]] bool prefillInt8() const noexcept { return int8PrefillRoles_ != 0; }
+  [[nodiscard]] bool prefillInt8(Int8PrefillRole role) const noexcept {
+    return (int8PrefillRoles_ & static_cast<uint8_t>(role)) != 0;
+  }
+  // Whether the int8 kernels take this projection: affine, bf16 output, 64
+  // columns per tile.
+  [[nodiscard]] static bool supportsInt8Prefill(const Projection &projection) noexcept;
 
   // One lane: at most 3 tiles * 4 group counts, 2 split tiles, 2 paired
   // N256 grids, and 4 Apple9 simdgroup K splits (including its baseline):
@@ -275,6 +310,17 @@ public:
                           metal::MetalBuffer residual, metal::MetalBuffer output, metal::MetalBuffer sums,
                           uint32_t rows, LinearScratch scratch = {}) const;
 
+  // The int8 activations of `rows` bf16 rows of `width` inputs.
+  void addPrefillQuantize(metal::CommandGraph &graph, metal::MetalBuffer input, Int8Activations activations,
+                          uint32_t width, uint32_t rows) const;
+  // The int8 prefill projections of `rows` rows (prefillInt8() must hold).
+  void addPrefillInt8(metal::CommandGraph &graph, Int8Activations input, const Projection &projection,
+                      metal::MetalBuffer output, uint32_t rows) const;
+  void addPrefillInt8Residual(metal::CommandGraph &graph, Int8Activations input, const Projection &projection,
+                              metal::MetalBuffer residual, metal::MetalBuffer output, uint32_t rows) const;
+  void addPrefillInt8UpWithGate(metal::CommandGraph &graph, Int8Activations input, const Projection &up,
+                                metal::MetalBuffer gateScratch, metal::MetalBuffer output, uint32_t rows) const;
+
   PreparedInput addDecode(metal::CommandGraph &graph, metal::MetalBuffer input, const Projection &projection,
                           metal::MetalBuffer output, LinearScratch scratch = {}) const;
   PreparedInput addDecodeBatch(metal::CommandGraph &graph, metal::MetalBuffer input,
@@ -313,8 +359,13 @@ private:
                        const Projection *gate) const;
   void addGgufFloatSegments(metal::CommandGraph &graph, const LinearBuffers &buffers,
                             const Projection &projection, const LinearPlan &plan) const;
+  // One int8 prefill kernel over `auxiliary` (residual or gate rows, or none).
+  void addPrefillInt8(metal::CommandGraph &graph, std::string_view kernel, Int8Activations input,
+                      const Projection &projection, metal::MetalBuffer auxiliary, metal::MetalBuffer output,
+                      uint32_t rows) const;
   uint32_t appleGpuFamily_ = 0;
   uint32_t gpuCores_ = 0;
+  uint8_t int8PrefillRoles_ = 0;
   std::vector<LinearChoice> choices_;
 };
 

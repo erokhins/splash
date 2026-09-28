@@ -213,6 +213,10 @@ struct QwenTargetPrefillBuffers final {
   metal::MetalBuffer attentionOutput;
   metal::MetalBuffer projectionSums;
   metal::MetalBuffer downProjectionSums;
+  // Int8 prefill activations (ops::Linear::prefillInt8): the quantized rows
+  // and per-group scales; the sums share projectionSums / downProjectionSums.
+  metal::MetalBuffer quantized;
+  metal::MetalBuffer activationScales;
   metal::MetalBuffer ropeCos;
   metal::MetalBuffer ropeSin;
   metal::MetalBuffer chunkKeys;
@@ -324,9 +328,15 @@ private:
   // A layer's parts in dispatch order: the mixer normalizes its input and
   // returns the residual rows the FFN normalizes and adds to into `output`.
   void addPrefillNorm(PrefillStep &step, metal::MetalBuffer input, const ops::NormWeights &norm,
-                      ops::WeightLayout consumer) const;
+                      const ops::Projection &consumer, ops::Int8PrefillRole role) const;
+  // The normalized rows' projection into `output`: from the int8 activations
+  // the norm wrote when the projection takes them, else from the bf16 rows.
+  void addPrefillInput(PrefillStep &step, const ops::Projection &projection, metal::MetalBuffer output) const;
   void addPrefillOutput(PrefillStep &step, metal::MetalBuffer hidden, const ops::Projection &projection,
                         metal::MetalBuffer input, metal::MetalBuffer output) const;
+  // Whether a prefill projection of `role` runs on int8 activations
+  // (Linear::prefillInt8).
+  [[nodiscard]] bool int8Prefill(const ops::Projection &projection, ops::Int8PrefillRole role) const noexcept;
   metal::MetalBuffer addPrefillMixer(PrefillStep &step, const QwenGdnWeights &mixer, const ops::NormWeights &norm,
                                      metal::MetalBuffer input) const;
   metal::MetalBuffer addPrefillMixer(PrefillStep &step, const QwenAttentionWeights &mixer,

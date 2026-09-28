@@ -82,9 +82,17 @@ struct OperatorChoices final {
 // a startup-only operation, before concurrent encoding. Arena sizing precedes
 // confirmation; those trials may only toggle the preallocated baseline/selected
 // pair. After Ready the owner and all borrowed plans remain immutable.
+// Startup options of the operators, from the runtime configuration.
+struct ExecutionOptions final {
+  // The affine prefill projections that take int8 activations where the
+  // device supports them (Linear::prefillInt8): a set of Int8PrefillRole
+  // bits, none by default.
+  uint8_t int8PrefillRoles = 0;
+};
+
 class ExecutionPlans final {
 public:
-  explicit ExecutionPlans(const DeviceCapabilities &device);
+  explicit ExecutionPlans(const DeviceCapabilities &device, ExecutionOptions options = {});
   [[nodiscard]] const Linear &linear() const noexcept { return linear_; }
   // Validate every table before replacing any installed choice. Missing keys
   // always use the operator's shipped baseline; an empty install resets all.

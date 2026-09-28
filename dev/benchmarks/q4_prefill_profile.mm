@@ -168,6 +168,72 @@ void profileUpSilu(MetalBackend &backend, uint32_t rows, uint32_t inputSize,
             << " projection_ms=" << median(projectionSamples) << '\n';
 }
 
+// The int8-activation projection (Apple10): the quantize producer and the
+// m32n64 kernel of one epilogue, on the same shape as profileShape.
+void profileInt8Shape(MetalBackend &backend, uint32_t rows, uint32_t inputSize,
+                      uint32_t outputSize, const std::string &projectionPipeline,
+                      const std::string &label, bool auxiliary = false) {
+  if (backend.capabilities().appleGpuFamily < 10) return;
+  constexpr uint32_t tileRows = 32, tileColumns = 64;
+  const uint32_t allocatedRows = (rows + tileRows - 1) / tileRows * tileRows;
+  const uint64_t inputElements = uint64_t{allocatedRows} * inputSize;
+  const uint64_t outputElements = uint64_t{allocatedRows} * outputSize;
+  const uint64_t weightElements = uint64_t{inputSize} * outputSize;
+  const uint64_t parameterElements = weightElements / kQuantGroup;
+  const uint64_t sumElements = uint64_t{allocatedRows} * (inputSize / kQuantGroup);
+
+  MetalBuffer input = shared(backend, inputElements * sizeof(__bf16), label + " input");
+  MetalBuffer quantized = shared(backend, inputElements, label + " quantized");
+  MetalBuffer activationScales = shared(backend, sumElements * sizeof(float), label + " activation scales");
+  MetalBuffer weights = shared(backend, weightElements / 2, label + " weights");
+  MetalBuffer scales = shared(backend, parameterElements * sizeof(__bf16), label + " scales");
+  MetalBuffer biases = shared(backend, parameterElements * sizeof(__bf16), label + " biases");
+  MetalBuffer output = shared(backend, outputElements * sizeof(__bf16), label + " output");
+  MetalBuffer aux = shared(backend, outputElements * sizeof(__bf16), label + " auxiliary");
+  MetalBuffer sums = shared(backend, sumElements * sizeof(float), label + " sums");
+  std::memset(input.contents(), 0x3c, input.sizeBytes());
+  std::memset(weights.contents(), 0x5a, weights.sizeBytes());
+  std::memset(scales.contents(), 0x3c, scales.sizeBytes());
+  std::memset(biases.contents(), 0x3c, biases.sizeBytes());
+  std::memset(aux.contents(), 0x3c, aux.sizeBytes());
+  Q4PrefillParams params{outputSize, inputSize};
+  uint32_t width = inputSize;
+
+  ComputeDispatch quantize;
+  quantize.pipelineName = "prefill_quantize_int8";
+  quantize.buffers = {{0, input}, {1, quantized}, {2, activationScales}, {3, sums}};
+  quantize.bytes = {{4, &width, sizeof(width)}};
+  quantize.threadgroups = {rows, 1, 1};
+  quantize.threadsPerThreadgroup = {256, 1, 1};
+
+  ComputeDispatch projection;
+  projection.pipelineName = projectionPipeline;
+  if (auxiliary) {
+    projection.buffers = {{0, quantized}, {1, weights}, {2, scales}, {3, biases},
+                          {4, aux}, {5, output}, {6, sums}, {7, activationScales}};
+    projection.bytes = {{8, &params, sizeof(params)}};
+  } else {
+    projection.buffers = {{0, quantized}, {1, weights}, {2, scales}, {3, biases},
+                          {4, output}, {5, sums}, {6, activationScales}};
+    projection.bytes = {{7, &params, sizeof(params)}};
+  }
+  projection.threadgroups = {allocatedRows / tileRows, outputSize / tileColumns, 1};
+  projection.threadsPerThreadgroup = {64, 1, 1};
+
+  for (uint32_t warmup = 0; warmup < 2; ++warmup) {
+    static_cast<void>(backend.submit(quantize));
+    static_cast<void>(backend.submit(projection));
+  }
+  std::vector<double> quantizeSamples;
+  std::vector<double> projectionSamples;
+  for (uint32_t repeat = 0; repeat < 7; ++repeat) {
+    quantizeSamples.push_back(backend.submit(quantize).gpuSeconds * 1000.0);
+    projectionSamples.push_back(backend.submit(projection).gpuSeconds * 1000.0);
+  }
+  std::cout << label << " rows=" << rows << " quantize_ms=" << median(quantizeSamples)
+            << " projection_ms=" << median(projectionSamples) << '\n';
+}
+
 void profileRmsSums(MetalBackend &backend, uint32_t rows, uint32_t width,
                     uint32_t tileRows, const std::string &sumPipeline,
                     const std::string &fusedPipeline,
@@ -285,6 +351,19 @@ void run(const std::string &metallibPath) {
   for (uint32_t rows : {128u, 512u, 1'808u, 2'048u}) {
     profileRmsSums(backend, rows, 5120, 32, "prefill_linear_q4_sums32",
                    "prefill_norm_rms_sums32", "rms_sums_m32");
+  }
+  // The int8-activation projections (Apple10 only): the plain kernel on each
+  // dense shape, and the residual and up-silu epilogues on the FFN shapes.
+  for (uint32_t rows : {128u, 512u, 1'024u, 2'048u}) {
+    profileInt8Shape(backend, rows, 5120, 17408, "prefill_linear_q4_int8_m32n64", "int8_ffn_up");
+    profileInt8Shape(backend, rows, 5120, 17408, "prefill_linear_q4_int8_m32n64_up_silu",
+                     "int8_ffn_up_silu", true);
+    profileInt8Shape(backend, rows, 17408, 5120, "prefill_linear_q4_int8_m32n64_residual",
+                     "int8_ffn_down_residual", true);
+    profileInt8Shape(backend, rows, 5120, 16640, "prefill_linear_q4_int8_m32n64", "int8_gdn_input");
+    profileInt8Shape(backend, rows, 5120, 14336, "prefill_linear_q4_int8_m32n64", "int8_attention_input");
+    profileInt8Shape(backend, rows, 6144, 5120, "prefill_linear_q4_int8_m32n64_residual",
+                     "int8_mixer_output_residual", true);
   }
 }
 

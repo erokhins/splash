@@ -122,6 +122,11 @@ enum class PrefillTensor : uint32_t {
   AttentionOutput,
   ProjectionSums,
   DownProjectionSums,
+  // The int8 prefill activations and their per-group scales
+  // (ops::Int8Activations); empty unless the operators run int8 prefill
+  // projections. The sums share ProjectionSums / DownProjectionSums.
+  QuantizedActivations,
+  ActivationScales,
   TargetPositions,
   DraftPositions,
   TargetInverseFrequencies,
