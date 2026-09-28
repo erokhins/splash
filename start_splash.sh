@@ -55,4 +55,5 @@ exec "$PYTHON" -u "$SCRIPT_DIR/server/server.py" \
     --tokenizer "$PACKAGE/tokenizer" \
     --model "$MODEL_ID" \
     --binary "$BINARY" \
+    --prefill-activations int8 \
     "$@"
