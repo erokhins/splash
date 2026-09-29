@@ -87,9 +87,16 @@ def _close_workers():
 def render(payload, limits, remaining):
     duration = MAX_SECONDS if remaining < 0 else min(MAX_SECONDS, remaining)
     deadline = time.monotonic() + duration
+    # A frozen server has no interpreter to run this file with; its entry
+    # point starts the worker by name instead (dev/tools/frozen_server.py).
+    worker = (
+        ["document-worker"]
+        if getattr(sys, "frozen", False)
+        else [str(Path(__file__).resolve())]
+    )
     command = [
         sys.executable,
-        str(Path(__file__).resolve()),
+        *worker,
         json.dumps(limits),
         str(duration),
     ]
@@ -155,7 +162,10 @@ def render(payload, limits, remaining):
 
 
 def main():
-    from documents import MAX_PDF_BYTES, DocumentBudget, RenderLimits, render_pages
+    if __package__:
+        from .documents import MAX_PDF_BYTES, DocumentBudget, RenderLimits, render_pages
+    else:
+        from documents import MAX_PDF_BYTES, DocumentBudget, RenderLimits, render_pages
 
     limits = RenderLimits(**json.loads(sys.argv[1]))
     duration = float(sys.argv[2])
