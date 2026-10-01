@@ -13,7 +13,7 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${SPLASH_TARGET:-$HOME/.local/share/junie-local/models/Qwen3.8-3.6-27B-blend-MLX-4bit}"
-DRAFT="${SPLASH_DRAFT:-$HOME/IdeaProjects/qwen3.8/models/Qwen3.8-3.6-27B-blend-DFlash2}"
+DRAFT="${SPLASH_DRAFT:-$HOME/.local/share/junie-local/models/Qwen3.8-3.6-27B-blend-DFlash2-MLX-4bit}"
 DATA="${SPLASH_DATA:-$HOME/.local/share/junie-local/splash-cache}"
 
 for path in "$TARGET/config.json" "$DRAFT/config.json"; do
