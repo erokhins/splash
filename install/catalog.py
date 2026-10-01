@@ -182,9 +182,16 @@ def spawn_refresh() -> None:
     """
     if not is_stale() or _offline():
         return
+    # The frozen server has no interpreter: it refreshes through its own
+    # subcommand (dev/tools/frozen_server.py).
+    command = (
+        [sys.executable, "catalog-refresh"]
+        if paths.FROZEN
+        else [sys.executable, "-B", str(Path(__file__).resolve())]
+    )
     try:
         subprocess.Popen(
-            [sys.executable, "-B", str(Path(__file__).resolve()), "--refresh"],
+            command + ["--refresh"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

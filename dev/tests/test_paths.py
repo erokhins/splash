@@ -71,3 +71,22 @@ class LayoutTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProgramTest(unittest.TestCase):
+    def test_a_program_runs_under_python_or_as_the_frozen_servers_subcommand(self):
+        script = paths.ROOT / "server/server.py"
+        with mock.patch.object(paths, "FROZEN", False):
+            self.assertEqual(
+                paths.program("server", script, "-u"),
+                [str(paths.PYTHON), "-u", str(script)],
+            )
+        with (
+            mock.patch.object(paths, "FROZEN", True),
+            mock.patch.object(paths.sys, "executable", "/bundle/splash-server"),
+        ):
+            # Interpreter options have no place: the executable takes none.
+            self.assertEqual(
+                paths.program("server", script, "-u"),
+                ["/bundle/splash-server", "server"],
+            )

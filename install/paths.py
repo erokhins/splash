@@ -9,11 +9,14 @@ itself.
 """
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGED = (ROOT / "release.json").is_file()
+# The frozen server build_server.sh builds: one executable, no interpreter.
+FROZEN = bool(getattr(sys, "frozen", False))
 DATA_VARIABLE = "SPLASH_DATA"
 
 
@@ -69,3 +72,13 @@ RUNTIME = _DEFAULT.runtime
 PROFILES = _DEFAULT.profiles
 PYTHON = ROOT / ("python/bin/python3" if PACKAGED else ".venv/bin/python")
 BINARY = ROOT / ("engine/splash" if PACKAGED else "build/splash")
+
+
+def program(subcommand, script, *options):
+    """The command that runs one of Splash's Python programs: script under
+    PYTHON with these interpreter options, or in the frozen server, which
+    has no interpreter, this executable's subcommand of that name
+    (dev/tools/frozen_server.py)."""
+    if FROZEN:
+        return [sys.executable, subcommand]
+    return [str(PYTHON), *options, str(script)]

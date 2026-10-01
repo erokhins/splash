@@ -116,9 +116,7 @@ def _ensure_installed(selection, layout):
             if check.returncode > 0 and report
             else f"the engine's device check failed: {report or f'status {check.returncode}'}"
         )
-    command = [
-        str(paths.PYTHON),
-        str(ROOT / "install/models.py"),
+    command = paths.program("install-models", ROOT / "install/models.py") + [
         "--models",
         str(selection.models_root),
         "--model",
@@ -235,10 +233,7 @@ def serve(args):
         root, record = assembly.hold(selection.link, selection.models_root)
         if record is not None:
             os.set_inheritable(record.fileno(), True)
-        command = [
-            str(paths.PYTHON),
-            "-u",
-            str(ROOT / "server/server.py"),
+        command = paths.program("server", ROOT / "server/server.py", "-u") + [
             str(root / "target"),
             str(root / "draft"),
             "--tokenizer",

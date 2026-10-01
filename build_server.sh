@@ -4,10 +4,11 @@ set -euo pipefail
 # Freeze server/server.py and the native engine into a self-contained tar.gz.
 #
 #   Output:  dist/splash-server-<version>-macos-arm64.tar.gz
-#   Run:     splash-server/splash-server <target> <draft> --tokenizer <dir> --model <id> [server.py args]
+#   Run:     splash-server/splash-server --model <owner/repo or DIR> [splash serve args]
 #
-# Takes the same arguments as server/server.py (see start_splash.sh); --binary
-# defaults to the bundled engine. Models are not bundled.
+# Takes the arguments of `splash serve` (install/launcher.py): installs the
+# model under the data directory, then serves it with the bundled engine.
+# Models are not bundled.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -30,6 +31,10 @@ UV_PYTHON_INSTALL_DIR="$BUILD_DIR/.python" \
   uv venv --managed-python --python 3.13 "$BUILD_DIR/.venv"
 uv pip install --python "$PYTHON" -r install/requirements.txt pyinstaller
 
+# The launcher takes its release layout (the engine under engine/, data under
+# the user's Application Support, no source build) from this file's presence.
+echo "{\"version\": \"$VERSION\"}" > "$BUILD_DIR/release.json"
+
 # PyInstaller follows every import statement, including those inside function
 # bodies. These are the files it cannot see that way.
 HIDDEN_DEPS=(
@@ -39,8 +44,13 @@ HIDDEN_DEPS=(
   # server.py reads the chat page beside itself.
   --add-data "$SCRIPT_DIR/server/chat.html:server"
   # server.py imports its siblings relatively only when run as a package,
-  # which the entry point does; collect them all by package name.
+  # which the entry point does; collect them all by package name. The
+  # launcher and installer likewise.
   --collect-submodules server
+  --collect-submodules install
+  --add-data "$BUILD_DIR/release.json:."
+  # The launcher's catalog falls back to this list.
+  --add-data "$SCRIPT_DIR/install/completions/official-models.txt:install/completions"
   # llguidance/__init__.py does `__version__ = version("llguidance")` at
   # import time, so it needs its .dist-info, not only its code.
   --copy-metadata llguidance
