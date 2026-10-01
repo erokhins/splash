@@ -556,6 +556,7 @@ def main_args(**overrides):
             "port": 0,
             "binary": "splash",
             "kv_format": "int8",
+            "prefill_activations": "bf16",
             **overrides,
         }
     )
