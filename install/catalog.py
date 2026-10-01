@@ -37,9 +37,18 @@ COLLECTION = "incoai/splash-6aac69afeba907af0511ec14"
 HUB_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
 
 BUNDLED = paths.ROOT / "install/completions/official-models.txt"
-CACHE = (
-    paths.DATA if paths.PACKAGED else paths.RUNTIME
-) / "catalog/official-models.txt"
+
+
+def cache_path() -> Path:
+    """The refreshed catalog, under the data directory in effect (SPLASH_DATA)."""
+    layout = paths.layout()
+    base = (
+        layout.data
+        if paths.PACKAGED and not paths.custom_data_dir()
+        else layout.runtime
+    )
+    return base / "catalog/official-models.txt"
+
 
 # A model joins the roster a handful of times a year, so a day-old catalog is
 # not meaningfully stale. This bound exists to stop a long-running install
@@ -70,12 +79,12 @@ def _read(path: Path) -> list[str]:
 
 def official_ids() -> list[str]:
     """Every official model ID this installation knows about."""
-    return sorted(set(_read(BUNDLED)) | set(_read(CACHE)))
+    return sorted(set(_read(BUNDLED)) | set(_read(cache_path())))
 
 
 def is_stale(now: float | None = None) -> bool:
     try:
-        age = (time.time() if now is None else now) - CACHE.stat().st_mtime
+        age = (time.time() if now is None else now) - cache_path().stat().st_mtime
     except OSError:
         return True
     return age >= MAX_AGE_SECONDS
@@ -130,7 +139,7 @@ def refresh(timeout: float = TIMEOUT_SECONDS, destination: Path | None = None) -
         # auth failure than a real roster of nothing.
         return False
 
-    destination = CACHE if destination is None else Path(destination)
+    destination = cache_path() if destination is None else Path(destination)
     body = "\n".join(identifiers) + "\n"
     try:
         try:

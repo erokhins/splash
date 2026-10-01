@@ -94,6 +94,7 @@ loopback, so use a listener that includes loopback when launching agents locally
 | `--revision` | Default branch | Select an upstream target branch, tag, or commit. See [revisions](#revisions). |
 | `--draft-model` | Matching DFlash2 checkpoint | Override the draft with a compatible repository or local directory. See [drafts](#drafts). |
 | `--language-only` | Off | Skip vision loading; image and PDF input is rejected. See [vision](#vision). |
+| `--data-dir` | `SPLASH_DATA` or Splash's data directory | Directory for everything Splash writes. See [data directory](#data-directory). |
 | `--host` | `127.0.0.1` | HTTP bind address. |
 | `--port` | `SPLASH_PORT` or `8000` | HTTP port. |
 | `--max-memory` | Auto | Ceiling on Metal allocations, e.g. `28G`; not combined process RSS. |
@@ -279,6 +280,31 @@ use the Hugging Face cache; prepared weights use `~/Library/Caches/Splash/weight
 (`SPLASH_WEIGHT_CACHE` relocates them). Later starts reuse prepared weights,
 and `brew upgrade splash` preserves models and agent sessions.
 See [weight preparation](#weight-preparation) for cache validation and cleanup.
+
+### Data directory
+
+`splash serve --data-dir DIR`, or `SPLASH_DATA=DIR`, puts everything Splash
+writes under one directory: installed models (`models/`), runtime state,
+locks, the catalog cache and agent profiles (`runtime/`), and unless they are
+set otherwise the prepared weights (`weights/`, `SPLASH_WEIGHT_CACHE`), Hub
+downloads (`huggingface/`, `HF_HUB_CACHE`, unless `HF_HOME` is set), the
+thinking key and crash traces. The launcher sets these variables for the
+installer and the server; an explicit `SPLASH_WEIGHT_CACHE`, `HF_HUB_CACHE`
+or `HF_HOME` still wins. Servers with different data directories share no
+locks, installations or caches, so a local model and its prepared weights can
+live beside another application's data:
+
+```sh
+splash serve --model ~/.local/share/app/models/My-MLX-4bit \
+    --draft-model ~/.local/share/app/models/My-DFlash2 \
+    --data-dir ~/.local/share/app/splash
+```
+
+With a local draft too, nothing is downloaded and no Hub cache is created.
+Without `--data-dir`, a release writes under `~/Library/Application
+Support/Splash` and a source checkout under `install/models`,
+`build/runtime` and `install/profiles`, with the caches in their default
+places ([Model storage](#model-storage)).
 
 ### Model cache
 

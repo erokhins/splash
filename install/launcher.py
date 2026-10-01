@@ -73,10 +73,26 @@ def _running_status(port=PORT):
     return status
 
 
-def _ensure_installed(selection):
+def data_environment(layout, custom):
+    """The environment of every process serving from layout. With custom, a
+    data directory the user chose, SPLASH_DATA names it and the prepared
+    weights and the Hub cache default under it too (SPLASH_WEIGHT_CACHE and
+    HF_HUB_CACHE, when neither they nor HF_HOME are set): nothing is written
+    outside it then. The default layout adds nothing."""
+    if not custom:
+        return {}
+    environment = {paths.DATA_VARIABLE: str(layout.data)}
+    if not os.environ.get("SPLASH_WEIGHT_CACHE"):
+        environment["SPLASH_WEIGHT_CACHE"] = str(layout.weights)
+    if not (os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME")):
+        environment["HF_HUB_CACHE"] = str(layout.hub_cache)
+    return environment
+
+
+def _ensure_installed(selection, layout):
     if not paths.PACKAGED:
         # Serialize builds across ports; make keeps the lock if the launcher exits.
-        with (RUNTIME_DIR / "build.lock").open("a+") as lock:
+        with (layout.runtime / "build.lock").open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             for command in (
                 ["make", "platform-check", "install-environment"],
@@ -167,11 +183,14 @@ def _check_port(host, port):
 
 
 def serve(args):
+    layout = paths.layout(args.data_dir)
+    # The installer, the catalog refresh and the server all read it.
+    os.environ.update(data_environment(layout, args.data_dir is not None))
     # Keep both locks across exec until the foreground server exits.
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    layout.runtime.mkdir(parents=True, exist_ok=True)
     with (
-        (RUNTIME_DIR / "serve.lock").open("a+") as installation,
-        (RUNTIME_DIR / f"serve-{args.port}.lock").open("a+") as lock,
+        (layout.runtime / "serve.lock").open("a+") as installation,
+        (layout.runtime / f"serve-{args.port}.lock").open("a+") as lock,
     ):
         # Servers share the installation; upgrades require exclusive access.
         try:
@@ -201,13 +220,13 @@ def serve(args):
                 f"cannot bind {args.host}:{args.port}: {error}"
             ) from None
         selection = model_artifacts.Selection.of(
-            paths.MODELS,
+            layout.models,
             args.model,
             revision=args.revision,
             language_only=args.language_only,
             draft_model=args.draft_model,
         )
-        _ensure_installed(selection)
+        _ensure_installed(selection, layout)
         # A concurrent install may advance the selection link. Keep this
         # process's tokenizer, draft and target on one immutable assembly,
         # held until the server exits.
@@ -478,6 +497,14 @@ def parse_args(argv=None):
         required=True,
         metavar="OWNER/REPO[:VARIANT]",
         help="upstream Hugging Face model, with a GGUF variant after ':' (e.g. :UD-Q4_K_M)",
+    )
+    server.add_argument(
+        "--data-dir",
+        metavar="DIR",
+        default=os.environ.get(paths.DATA_VARIABLE) or None,
+        help="directory for everything Splash writes: installed models, runtime "
+        "state, and unless set otherwise prepared weights and Hub downloads "
+        f"(default: {paths.DATA_VARIABLE} or Splash's own data directory)",
     )
     server.add_argument(
         "--revision",
