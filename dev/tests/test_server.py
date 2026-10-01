@@ -3351,10 +3351,12 @@ class ServerTest(unittest.TestCase):
         for arguments in (
             [],
             required[:-2],
-            [*required[:-1], "qwen3.8-27b"],
-            [*required[:-1], "Qwen3.8-27B"],
             [*required[:-1], "https://huggingface.co/community/model"],
             [*required[:-1], "community/../model"],
+            [*required[:-1], "a name with spaces"],
+            [*required[:-1], "name?"],
+            [*required[:-1], "name:"],
+            [*required[:-1], ""],
         ):
             with (
                 self.subTest(arguments=arguments),
@@ -3362,6 +3364,9 @@ class ServerTest(unittest.TestCase):
                 self.assertRaises(SystemExit),
             ):
                 api.parse_args(arguments)
+        # A local model directory is served under its name (install/launcher.py).
+        for name in ("Qwen3.8-27B", "My-MLX-4bit", "qwen3.8-27b"):
+            self.assertEqual(api.parse_args([*required[:-1], name]).model, name)
         args = api.parse_args(required)
         self.assertEqual(Path(args.target), package / "target")
         self.assertEqual(Path(args.draft), package / "draft")

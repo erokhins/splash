@@ -227,10 +227,30 @@ code is not loaded.
 splash serve --model mlx-community/Qwen3.6-35B-A3B-4bit
 splash serve --model unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
 splash serve --model mlx-community/Qwen3.8-27B-4bit --language-only
+splash serve --model ~/models/My-MLX-4bit --draft-model ~/models/My-DFlash2
 ```
 
 A model ID with `--revision`, `--language-only` or `--draft-model` is a
 separate installation from the same ID without them.
+
+### Local model directories
+
+`--model DIR` installs the model a local directory holds, as `--draft-model
+DIR` takes a local draft: an MLX checkpoint with its tokenizer, or a
+repository's files with one target GGUF. The directory is one more source
+(`hub.Repository.local_directory`): it is inspected and paired with its
+family's draft exactly as a repository is, its files are linked into an
+assembly under the models root, and `model.json` records each with its
+content digest, which costs one read of the directory at installation. Every
+later start verifies the links by size and time and starts without the Hub;
+when a file in the directory changes, the assembly is built again. The
+directory itself is never written. The model is served as the directory's
+name (`/v1/models` and the startup summary); `--served-model-name` adds
+aliases as for any model. Its selection link is under `.selections`, keyed by
+the absolute path and the source options, so the same directory under
+`--language-only` or another `--draft-model` is a separate installation. A
+local directory has no revision: `--revision` is rejected, and a Splash
+package directory is not accepted (serve its Hub repository instead).
 
 ### Revisions
 

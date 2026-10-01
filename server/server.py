@@ -1871,15 +1871,24 @@ def _parse_request_size(value):
 
 
 def _parse_model_id(value):
+    """The model's API ID: a Hub ID, owner/repo[:variant], or the name of a
+    local model directory (install/models.py model_label); any served name."""
     repo_id, separator, variant = value.partition(":")
-    if repo_id.count("/") != 1:
+    if repo_id.count("/") == 1:
+        try:
+            validate_repo_id(repo_id)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(str(error)) from None
+    elif separator or "/" in repo_id:
         raise argparse.ArgumentTypeError(
-            "use a full Hugging Face repository ID: owner/repo[:variant]"
+            "use a full Hugging Face repository ID, owner/repo[:variant], "
+            "or a local model's name"
         )
-    try:
-        validate_repo_id(repo_id)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(str(error)) from None
+    else:
+        try:
+            validate_served_model_name(repo_id)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(str(error)) from None
     if separator and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", variant):
         raise argparse.ArgumentTypeError(
             "model variant must be a short name such as UD-Q4_K_M"
@@ -1893,7 +1902,7 @@ def parse_args(argv=None):
     parser.add_argument("draft")
     parser.add_argument("--tokenizer", required=True)
     parser.add_argument(
-        "--model", type=_parse_model_id, required=True, metavar="OWNER/REPO"
+        "--model", type=_parse_model_id, required=True, metavar="OWNER/REPO|NAME"
     )
     parser.add_argument(
         "--served-model-name",

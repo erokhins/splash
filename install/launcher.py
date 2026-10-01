@@ -207,9 +207,18 @@ def serve(args):
                 f"Splash is already serving{_serve_lock_owner(lock)}; "
                 "stop it with Ctrl+C first"
             ) from None
+        selection = model_artifacts.Selection.of(
+            layout.models,
+            args.model,
+            revision=args.revision,
+            language_only=args.language_only,
+            draft_model=args.draft_model,
+        )
         lock.seek(0)
         lock.truncate()
-        json.dump({"pid": os.getpid(), "model": args.model, "port": args.port}, lock)
+        json.dump(
+            {"pid": os.getpid(), "model": selection.label, "port": args.port}, lock
+        )
         lock.flush()
         # Fail before downloads/builds if another service owns the selected port.
         # The HTTP server also binds before loading weights, closing the race.
@@ -219,13 +228,6 @@ def serve(args):
             raise LauncherError(
                 f"cannot bind {args.host}:{args.port}: {error}"
             ) from None
-        selection = model_artifacts.Selection.of(
-            layout.models,
-            args.model,
-            revision=args.revision,
-            language_only=args.language_only,
-            draft_model=args.draft_model,
-        )
         _ensure_installed(selection, layout)
         # A concurrent install may advance the selection link. Keep this
         # process's tokenizer, draft and target on one immutable assembly,
@@ -242,7 +244,7 @@ def serve(args):
             "--tokenizer",
             str(root / "tokenizer"),
             "--model",
-            args.model,
+            selection.label,
             "--binary",
             str(paths.BINARY),
             "--host",
@@ -473,7 +475,8 @@ def parse_args(argv=None):
         epilog=(
             "Examples:\n"
             "  splash serve --model mlx-community/Qwen3.8-27B-4bit\n"
-            "  splash serve --model unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --max-context 128K\n\n"
+            "  splash serve --model unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --max-context 128K\n"
+            "  splash serve --model ~/models/My-MLX-4bit --draft-model ~/models/My-DFlash2 --data-dir ~/splash-data\n\n"
             "After Ready, open http://127.0.0.1:8000 or connect an installed agent.\n"
             "The startup summary and /status report the effective context limit.\n"
             "A client may impose a smaller limit. Keep this terminal open; Ctrl+C stops serving."
@@ -495,8 +498,9 @@ def parse_args(argv=None):
         "--model",
         type=model_artifacts.parse_model_id,
         required=True,
-        metavar="OWNER/REPO[:VARIANT]",
-        help="upstream Hugging Face model, with a GGUF variant after ':' (e.g. :UD-Q4_K_M)",
+        metavar="OWNER/REPO[:VARIANT]|DIR",
+        help="upstream Hugging Face model, with a GGUF variant after ':' (e.g. :UD-Q4_K_M), "
+        "or a local model directory, served under the directory's name",
     )
     server.add_argument(
         "--data-dir",
