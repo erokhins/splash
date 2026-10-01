@@ -713,6 +713,38 @@ class ModelArtifactTest(unittest.TestCase):
             installer.selection_link(models, "owner/repo"), models / "owner/repo"
         )
 
+    def test_a_local_directory_is_a_model_with_a_hashed_selection_link(self):
+        folder = self.root / "models-on-disk" / "My-MLX-4bit"
+        folder.mkdir(parents=True)
+        resolved = str(folder.resolve())
+        with contextlib.chdir(self.root):
+            # Absolute, ~ and relative paths of an existing directory alike.
+            for given in (str(folder), os.path.relpath(folder, self.root)):
+                self.assertEqual(installer.parse_model_id(given), resolved)
+        with mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            self.assertEqual(
+                installer.parse_model_id("~/models-on-disk/My-MLX-4bit"), resolved
+            )
+        self.assertTrue(installer.is_local(resolved))
+        self.assertFalse(installer.is_local("owner/repo"))
+        self.assertEqual(installer.model_label(resolved), "My-MLX-4bit")
+        self.assertEqual(installer.model_label("owner/repo:Q4"), "owner/repo:Q4")
+        self.assertEqual(installer.split_model_id(resolved), (resolved, None))
+        # A missing directory is reported as such, not as a malformed ID.
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "directory not found"):
+            installer.parse_model_id(str(self.root / "missing"))
+        models = self.root / "models"
+        link = installer.selection_link(models, resolved)
+        self.assertEqual(link.parent, models / ".selections")
+        self.assertNotEqual(
+            link, installer.selection_link(models, resolved, language_only=True)
+        )
+        chosen = installer.Selection.of(models, resolved)
+        self.assertEqual((chosen.repo_id, chosen.variant), (resolved, None))
+        self.assertTrue(chosen.local)
+        self.assertEqual(chosen.label, "My-MLX-4bit")
+        self.assertFalse(installer.Selection.of(models, "owner/repo").local)
+
     def test_link_prints_the_selection_link_of_the_source_options(self):
         # make's MODEL_ROOT is this output; a relative draft folder names the
         # installation splash serve --draft-model selects from the same folder.

@@ -186,7 +186,8 @@ def repair_pins(installation: Path, snapshots):
 class Repository:
     """One source at one commit: a Hub repository at the commit its revision
     resolved to, listed by the Hub (directory None) or read from that
-    commit's cached snapshot, or a local draft directory (revision None).
+    commit's cached snapshot, or a local model or draft directory (revision
+    None).
     The commit of a verified installation that starts without the Hub is
     not listed at all: that installation's links name its files."""
 
@@ -212,7 +213,7 @@ class Repository:
     def local_directory(cls, path):
         path = Path(path)
         if not path.is_dir():
-            raise models.ModelError(f"local draft directory not found: {path}")
+            raise models.ModelError(f"local directory not found: {path}")
         return cls(str(path), None, _listing(path), path)
 
     @classmethod
@@ -240,9 +241,9 @@ class Repository:
         """name at the commit revision names now. This decides whether the
         Hub is asked.
 
-        Only an absolute path is a local directory: parse_draft_model makes a
-        --draft-model directory absolute, and a target is always a Hub ID,
-        whatever the working directory holds. installed is the commit a
+        Only an absolute path is a local directory: parse_model_id and
+        parse_draft_model make a --model or --draft-model directory
+        absolute, whatever the working directory holds. installed is the commit a
         verified installation of this selection records; its links name its
         files, wherever HF_HUB_CACHE points now. A commit revision never
         moves and HF_HUB_OFFLINE forbids requests, so with installed either

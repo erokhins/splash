@@ -1,5 +1,6 @@
-"""Install supported upstream models: a target repository and the draft
-trained for its architecture, as an assembly (assembly.py).
+"""Install supported upstream models: a target repository, or a local
+directory holding one, and the draft trained for its architecture, as an
+assembly (assembly.py).
 
 The Hub owns downloads and snapshots; this module inspects the target,
 selects its components and decides when to follow the Hub, and the native
@@ -9,7 +10,9 @@ any weight download, and paired with the draft trained for its family
 (families.py); repository names play no part. Every start follows the
 target's revision, then its draft's, with one Hub request each, and
 publishes a new commit's assembly atomically; the installed assembly starts
-when the Hub cannot answer or the new commit cannot be installed.
+when the Hub cannot answer or the new commit cannot be installed. A local
+target directory has no revision: its assembly is built once, verified at
+every start by its files' sizes and times, and built again when they change.
 """
 
 from __future__ import annotations
@@ -292,6 +295,8 @@ def prepare(selection):
     cannot answer, or a new commit cannot be installed, the verified
     installation starts instead. A legacy Splash package is installed by
     legacy.prepare."""
+    if selection.local and selection.revision:
+        raise models.ModelError("--revision requires an upstream model ID")
     kind = models.installation_kind(selection.link)
     if kind == models.PACKAGE:
         legacy.prepare(selection)
@@ -310,6 +315,11 @@ def prepare(selection):
         installed=installed_commit,
     )
     if installed is None and _is_legacy_package(target, selection.model):
+        if selection.local:
+            raise models.ModelError(
+                f"{selection.model} is a Splash package; a local model directory "
+                "must hold an MLX checkpoint or a GGUF"
+            )
         legacy.prepare(selection)
     elif installed is not None and target.revision == installed_commit:
         _start_installed(selection, target, installed)
@@ -337,7 +347,7 @@ def _start_installed(selection, target, installed):
     if target.unreachable_reason:
         print(
             f"Could not reach the Hub ({target.unreachable_reason}); "
-            f"using the installed {selection.repo_id}@{target.revision[:12]}.",
+            f"using the installed {_at(target)}.",
             flush=True,
         )
     recorded = installed["sources"]["target"]
@@ -400,9 +410,8 @@ def _keeping_installation(selection, installed, attempt):
     try:
         yield
     except (models.ModelError, OSError) as error:
-        commit = installed["sources"]["target"]["revision"]
         models.warn(
-            f"keeping the installed {selection.repo_id}@{commit[:12]}; "
+            f"keeping the installed {_recorded_at(installed['sources']['target'])}; "
             f"cannot {attempt}: {error}"
         )
         if _retain_installed(selection) is not None:
@@ -562,7 +571,14 @@ def _answered(repo):
 
 def _at(repo):
     """repo@commit, or a local directory's path."""
-    return f"{repo.name}@{repo.revision[:12]}" if repo.revision else repo.name
+    return _recorded_at(repo.identity())
+
+
+def _recorded_at(source):
+    """repo@commit, or a local directory's path, as a record names it."""
+    if source["revision"]:
+        return f"{source['repo']}@{source['revision'][:12]}"
+    return source["repo"]
 
 
 def _draft_files(repo, family):

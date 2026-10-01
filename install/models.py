@@ -3,15 +3,15 @@
 """Install and verify the model a Splash selection names.
 
 Terms the installer modules share:
-- selection: what `--model OWNER/REPO[:VARIANT]` and its source options name
-  (Selection); its selection link, under the models root, points to what
-  serves it.
+- selection: what `--model OWNER/REPO[:VARIANT]`, or `--model DIR` for a
+  local model directory, and its source options name (Selection); its
+  selection link, under the models root, points to what serves it.
 - assembly: the directory an upstream model is served from, of links to
   source snapshot files and its record, model.json (assembly.py), built and
   published by upstream.py. A legacy Splash package is served from its own
   Hub snapshot instead (legacy.py).
 - source snapshot: a repository at one commit in the Hub cache, or a local
-  draft directory (hub.py).
+  model or draft directory (hub.py).
 
 This module holds what the installers share, and the command line.
 """
@@ -99,10 +99,25 @@ def validate_repo_id(value: str) -> str:
     return value
 
 
+def is_local(model) -> bool:
+    """Whether a model names a local directory: an absolute path, as
+    parse_model_id and parse_draft_model record one, never a Hub ID."""
+    return isinstance(model, str) and Path(model).is_absolute()
+
+
+def model_label(model: str) -> str:
+    """The name a model is served and reported as: a Hub ID as given, a
+    local directory by its name."""
+    return Path(model).name if is_local(model) else model
+
+
 def split_model_id(value: str) -> tuple[str, str | None]:
-    """owner/repo[:variant] -> (repository ID, variant or None)."""
+    """owner/repo[:variant] -> (repository ID, variant or None); a local
+    directory -> (its path, None)."""
     if not isinstance(value, str):
         raise ModelError("model must be a full Hugging Face repository ID (owner/repo)")
+    if is_local(value):
+        return value, None
     repo_id, separator, variant = value.partition(VARIANT_SEPARATOR)
     validate_repo_id(repo_id)
     if not separator:
@@ -115,7 +130,21 @@ def split_model_id(value: str) -> tuple[str, str | None]:
     return repo_id, variant
 
 
+def _local_directory(value):
+    """value's directory as an absolute path, or None when it names no
+    directory. A local directory is recorded absolute, so the installation
+    it selects does not depend on the working directory."""
+    if value and (local := Path(value).expanduser()).is_dir():
+        return str(local.resolve())
+    return None
+
+
 def parse_model_id(value: str) -> str:
+    """A model argument: a local model directory, else owner/repo[:variant]."""
+    if local := _local_directory(value):
+        return local
+    if is_local(value):
+        raise argparse.ArgumentTypeError(f"local model directory not found: {value}")
     try:
         split_model_id(value)
     except ModelError as error:
@@ -124,10 +153,8 @@ def parse_model_id(value: str) -> str:
 
 
 def parse_draft_model(value: str) -> str:
-    # A local draft directory is recorded as an absolute path, so the
-    # installation it selects does not depend on the working directory.
-    if value and (local := Path(value).expanduser()).is_dir():
-        return str(local.resolve())
+    if local := _local_directory(value):
+        return local
     try:
         return validate_repo_id(value)
     except ModelError:
@@ -172,10 +199,11 @@ def selection_link(
     models: Path, model_id: str, *, revision=None, language_only=False, draft_model=None
 ) -> Path:
     """The selection link of model_id with these source options:
-    OWNER/REPO[:VARIANT] under models for the model alone, else
-    .selections/<hash of the selection>."""
+    OWNER/REPO[:VARIANT] under models for a Hub model alone, else
+    .selections/<hash of the selection>; a local directory's path takes
+    the place of its ID."""
     repo_id, variant = split_model_id(model_id)
-    if revision or language_only or draft_model:
+    if revision or language_only or draft_model or is_local(model_id):
         selection = json.dumps(
             [model_id, revision, language_only, draft_model], separators=(",", ":")
         )
@@ -192,7 +220,8 @@ def selection_links(models: Path):
 
 @dataclass(frozen=True)
 class Selection:
-    """What --model and its source options select, and its selection link."""
+    """What --model and its source options select, and its selection link.
+    For a local model directory, model and repo_id are its absolute path."""
 
     model: str
     repo_id: str
@@ -226,6 +255,16 @@ class Selection:
             models_root,
             link,
         )
+
+    @property
+    def local(self) -> bool:
+        """Whether the model is a local directory, not a Hub repository."""
+        return is_local(self.model)
+
+    @property
+    def label(self) -> str:
+        """The name the model is served and reported as (model_label)."""
+        return model_label(self.model)
 
 
 def installation_kind(link: Path):
@@ -282,7 +321,8 @@ def parse_args(argv=None):
         "--model",
         required=True,
         type=parse_model_id,
-        help="Hugging Face repository ID (owner/repo[:variant])",
+        help="Hugging Face repository ID (owner/repo[:variant]) or a local "
+        "model directory",
     )
     parser.add_argument("--revision", help="optional upstream branch, tag or commit")
     parser.add_argument(
