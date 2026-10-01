@@ -179,6 +179,64 @@ void writeQuantized(int destination, const Section &section, std::vector<uint8_t
   }
 }
 
+// Bytes per row of a Dequantize section's source (codes, scales and biases of
+// its groups) and of its BF16 rows.
+std::pair<uint64_t, uint64_t> dequantizeRowBytes(const Section &section) {
+  const auto unit = groupBytes(section);
+  const uint64_t groups = section.columns / kQ4GroupElements;
+  return {groups * (unit[0] + unit[1] + unit[2]), uint64_t(section.columns) * kBFloat16Bytes};
+}
+
+// Rows of a Dequantize section one step restores within the staging bound.
+uint32_t dequantizeStepRows(const Section &section) {
+  const auto [sourceRowBytes, rowBytes] = dequantizeRowBytes(section);
+  const uint64_t rows = kChunkBytes / std::max(sourceRowBytes, rowBytes);
+  if (!rows) throw std::runtime_error("dequantized row exceeds the preparation staging bound");
+  return static_cast<uint32_t>(std::min<uint64_t>(rows, section.rows));
+}
+
+// Restores the rows of an MLX Q4 tensor, codes, scales and biases as stored,
+// to BF16: each weight is scale * code + bias in float, rounded once (MLX's
+// bfloat16 dequantization rounds the product and the sum), in steps of whole
+// rows.
+void writeDequantized(int destination, const Section &section, std::vector<uint8_t> &input,
+                      std::vector<uint8_t> &output, const PreparationCheck &admit) {
+  const uint32_t groups = section.columns / kQ4GroupElements;
+  const auto unit = groupBytes(section);
+  const auto [sourceRowBytes, rowBytes] = dequantizeRowBytes(section);
+  const uint32_t stepRows = dequantizeStepRows(section);
+  const ProjectionPart &part = section.parts.front();
+  for (uint32_t firstRow = 0; firstRow < section.rows; firstRow += stepRows) {
+    admit();
+    const uint32_t count = std::min(stepRows, section.rows - firstRow);
+    // The step's fields, one after another, each its rows as stored.
+    std::array<uint8_t *, 3> fields{input.data()};
+    for (size_t field = 1; field < unit.size(); ++field)
+      fields[field] = fields[field - 1] + uint64_t(count) * groups * unit[field - 1];
+    for (size_t field = 0; field < unit.size(); ++field)
+      part.fields[field].tensor->read(uint64_t(firstRow) * groups * unit[field],
+                                      {fields[field], uint64_t(count) * groups * unit[field]});
+    for (uint32_t row = 0; row < count; ++row) {
+      for (uint32_t group = 0; group < groups; ++group) {
+        const uint64_t at = uint64_t(row) * groups + group;
+        const uint8_t *codes = fields[0] + at * unit[0];
+        const float scale = bfloat16Value(fields[1] + at * unit[1]);
+        const float bias = bfloat16Value(fields[2] + at * unit[2]);
+        uint8_t *to = output.data() + row * rowBytes + uint64_t(group) * kQ4GroupElements * kBFloat16Bytes;
+        for (uint32_t i = 0; i < kQ4GroupElements; ++i) {
+          const float code = static_cast<float>((codes[i / 2] >> (4 * (i & 1))) & 15);
+          const float value = std::fma(scale, code, bias);
+          if (!std::isfinite(value)) throw std::runtime_error("non-finite weight in an affine Q4 tensor");
+          const uint16_t bits = nearestBfloat16(value);
+          std::memcpy(to + i * kBFloat16Bytes, &bits, sizeof bits);
+        }
+      }
+    }
+    writeWeightBytes(destination, section.offset + uint64_t(firstRow) * rowBytes,
+                     std::span(output).first(uint64_t(count) * rowBytes));
+  }
+}
+
 // float(-exp(double(A_log))) of a BF16 or F32 vector. The A_log it reads and
 // the decay it writes are staged together, within the staging bound of every
 // conversion step.
@@ -239,6 +297,13 @@ void writeAffineImage(int destination, const Image &image, const PreparationChec
       outputBytes = std::max(outputBytes, rows * (unit[0] + unit[1] + unit[2]));
       break;
     }
+    case SectionKind::Dequantize: {
+      const auto [sourceRowBytes, rowBytes] = dequantizeRowBytes(section);
+      const uint32_t rows = dequantizeStepRows(section);
+      inputBytes = std::max(inputBytes, rows * sourceRowBytes);
+      outputBytes = std::max(outputBytes, rows * rowBytes);
+      break;
+    }
     case SectionKind::Copy:
       inputBytes = std::max(inputBytes, std::min(section.bytes, kChunkBytes));
       break;
@@ -256,6 +321,9 @@ void writeAffineImage(int destination, const Image &image, const PreparationChec
       break;
     case SectionKind::Quantize:
       writeQuantized(destination, section, input, output, admit);
+      break;
+    case SectionKind::Dequantize:
+      writeDequantized(destination, section, input, output, admit);
       break;
     case SectionKind::Decay:
       writeDecay(destination, section);

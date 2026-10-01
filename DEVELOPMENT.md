@@ -348,17 +348,23 @@ Each family names the repository of the DFlash2 checkpoint trained for it
 Installation downloads only those files and follows the repository's default
 branch as it follows the target's ([Revisions](#revisions)); `--draft-model`
 accepts another repository, followed the same way, or a local directory that
-holds them. A checkpoint is installed only when its configuration states the
-family's draft signature (`Draft.signature`), every field and value native
+holds them, including an MLX conversion of the checkpoint quantized to 4 bits
+in groups of 64 (`mlx_lm.convert -q`, whose `config.json` states the
+quantization). A checkpoint is installed only when its configuration states
+the family's draft signature (`Draft.signature`), every field and value native
 loading requires, so a draft of another architecture never replaces one that
 loads. Native loading validates the configuration against the target and
 prepares the draft like a target ([Weight preparation](#weight-preparation)):
 `DraftCheckpointLoader` (`DraftCheckpoint.cpp`) plans the packed draft files
-of a Splash package, `layer-<N>.bin` and `model.bin`, and `AffinePreparation`
-quantizes each projection to 4 bits in groups of 64 as MLX's affine
-quantization rounds it and copies every other tensor as stored. For both
-families the prepared files are byte for byte the Q4 drafts of the Splash
-packages.
+of a Splash package, `layer-<N>.bin` and `model.bin`, following the form each
+module is stored in, and `AffinePreparation` quantizes each BF16 projection to
+4 bits in groups of 64 as MLX's affine quantization rounds it, retiles an
+MLX-quantized one without requantization, restores an MLX-quantized selector
+codebook to the BF16 the draft kernels read (`scale * code + bias`, rounded
+once), and copies every other tensor as stored. For both families the files
+prepared from the released checkpoint are byte for byte the Q4 drafts of the
+Splash packages; a quantized conversion prepares the same layer files, and a
+`model.bin` whose codebooks carry the conversion's rounding.
 
 ### Tokenizer and chat templates
 
@@ -457,15 +463,18 @@ for the draft, `GgufTargetLoader` (`GgufTarget.cpp`, planned by `GgufImage.cpp`)
 and `GgufPreparation` for a GGUF target, `VisionLoader` and `VisionPreparation`
 for an MLX or GGUF vision tower. They open their files through `PreparedFiles`,
 the `PreparedWeights` cache with the load's guards. `AffinePreparation` reorders
-an MLX target's codes, scales and biases into 256-row tiles without
-requantization, quantizes the draft's BF16 projections into the same tiles
+an MLX target's or MLX-quantized draft's codes, scales and biases into 256-row
+tiles without requantization, quantizes the draft's BF16 projections into the
+same tiles, restores an MLX-quantized draft's codebooks to BF16
 ([Drafts](#drafts)) and computes GDN decay as `float(-exp(double(A_log)))`,
 which may differ by one float ULP in this small vector from packages produced
 with MLX's float exponential. `GgufPreparation` repacks GGUF blocks ([GGUF
 targets](#gguf-targets)).
 
 Preparation never rounds a target or vision weight, and rounds the draft's
-projections only as the packages' drafts are rounded. A tensor it converts to
+projections only as the packages' drafts are rounded; a codebook restored from
+an MLX-quantized draft is rounded once to BF16 from the exact
+`scale * code + bias`. A tensor it converts to
 BF16 (vision tensors stored as F32 or F16, a GGUF's convolution taps and
 time-step bias) must be exactly representable in BF16; otherwise preparation
 fails, naming the tensor and, for a vision tensor, its file.

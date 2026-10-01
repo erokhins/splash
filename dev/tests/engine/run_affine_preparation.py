@@ -1,6 +1,6 @@
 """Small standalone dense and MoE affine checkpoints and a DFlash2 draft
-checkpoint, an independent byte-layout oracle of every prepared image and
-their golden hashes."""
+checkpoint, BF16 and MLX-quantized, an independent byte-layout oracle of
+every prepared image and their golden hashes."""
 
 import argparse
 import json
@@ -235,23 +235,76 @@ def quantized_group(weights):
     return packed, struct.pack("<H", bf16(scale)), struct.pack("<H", bf16(bias))
 
 
-def draft_fixture(root):
+def bf16_value(packed):
+    """The value of a packed BF16."""
+    return F32.unpack(b"\0\0" + packed)[0]
+
+
+def dequantized_group(codes, scale, bias):
+    """The BF16 weights of a quantized group restored as the preparation
+    restores them: scale * code + bias, rounded once from the exact value
+    (the product and the sum are exact in double)."""
+    scale, bias = bf16_value(scale), bf16_value(bias)
+    return b"".join(
+        struct.pack("<H", bf16(f32(scale * ((codes[i // 2] >> 4 * (i % 2)) & 15) + bias)))
+        for i in range(64)
+    )
+
+
+def draft_fixture(root, quantized=False):
     """A two-layer DFlash2 checkpoint of width 256 as its repository releases
     it, config.json and BF16 safetensors, and the draft files its preparation
-    must write: each projection quantized, every other tensor as stored."""
+    must write: each projection quantized, every other tensor as stored.
+    With quantized, the checkpoint as an MLX conversion stores it: each
+    projection and codebook as MLX affine Q4 (weight codes, scales and
+    biases of groups of 64) under the config's quantization. Its layer files
+    are those of the BF16 checkpoint, whose projections quantize to the
+    stored codes; its model.bin restores each codebook to BF16."""
     tensors, values = {}, {}
 
     def add(name, shape, data=None):
         count = math.prod(shape)
         if data is None:
-            # Multiples of 1/64 within 4 of zero, each exactly a BF16.
-            seed = len(tensors) + 1
+            # Multiples of 1/64 within 4 of zero, each exactly a BF16, the
+            # same whichever form the checkpoint stores.
+            seed = len(values) + 1
             data = [((i * 37 + seed * 11) % 509 - 254) / 64 for i in range(count)]
         values[name] = data
         tensors[name] = (shape, "BF16", struct.pack(f"<{count}H", *map(bf16, data)))
         return tensors[name][2]
 
-    def quantized(names, columns):
+    def groups_of(name, columns):
+        # Each row's groups of values[name] quantized: (codes, scale, bias).
+        data = values[name]
+        return [
+            [
+                quantized_group(data[row + g * 64 : row + (g + 1) * 64])
+                for g in range(columns // 64)
+            ]
+            for row in range(0, len(data), columns)
+        ]
+
+    def store(module, stored, columns):
+        # With quantized, module's BF16 tensor `stored` is replaced by the
+        # MLX Q4 fields of its rows.
+        if not quantized:
+            return
+        rows = groups_of(stored, columns)
+        del tensors[stored]
+        fields = (("weight", columns // 8, "U32"), ("scales", columns // 64, "BF16"), ("biases", columns // 64, "BF16"))
+        for index, (field, width, dtype) in enumerate(fields):
+            data = b"".join(group[index] for row in rows for group in row)
+            tensors[module + "." + field] = ([len(rows), width], dtype, data)
+
+    def codebook(name, rows, columns):
+        # The BF16 codebook as stored, or as restored from its Q4 fields.
+        expected = add(name, [rows, columns])
+        if quantized:
+            expected = b"".join(dequantized_group(*group) for row in groups_of(name, columns) for group in row)
+        store(name, name, columns)
+        return expected
+
+    def packed(names, columns):
         # The parts' rows quantized, each field in [rows / 256][groups][256]
         # tiles of its group bytes: codes, then scales, then biases.
         rows = [
@@ -274,7 +327,8 @@ def draft_fixture(root):
 
     def projection(name, rows, columns, data=None):
         add(name + ".weight", [rows, columns], data)
-        return quantized([name + ".weight"], columns)
+        store(name, name + ".weight", columns)
+        return packed([name + ".weight"], columns)
 
     expected = root / "expected"
     expected.mkdir()
@@ -303,8 +357,9 @@ def draft_fixture(root):
         ]
         for name, rows in (("q_proj", 128), ("k_proj", 64), ("v_proj", 64)):
             add(a + name + ".weight", [rows, 256])
+            store(a + name, a + name + ".weight", 256)
         sections.append(
-            quantized([a + n + ".weight" for n in ("q_proj", "k_proj", "v_proj")], 256)
+            packed([a + n + ".weight" for n in ("q_proj", "k_proj", "v_proj")], 256)
         )
         sections += [
             add(a + "q_norm.weight", [64]),
@@ -325,8 +380,8 @@ def draft_fixture(root):
         add("hidden_norm.weight", [256]),
         add("norm.weight", [256]),
         projection("candidate_selector.hidden_projection", 256, 256),
-        add("candidate_selector.predecessor_codebook", [256, 256]),
-        add("candidate_selector.successor_codebook", [256, 256]),
+        codebook("candidate_selector.predecessor_codebook", 256, 256),
+        codebook("candidate_selector.successor_codebook", 256, 256),
     ]
     (expected / "model.bin").write_bytes(weight_file("MDFD0004", 2, 1, sections))
     config = {
@@ -340,6 +395,8 @@ def draft_fixture(root):
         "vocab_size": 256,
         "dflash_config": {"selector_rank": 256},
     }
+    if quantized:
+        config["quantization"] = {"bits": 4, "group_size": 64, "mode": "affine"}
     (root / "config.json").write_text(json.dumps(config))
     write_safetensors(root / "model.safetensors", tensors)
 
@@ -373,6 +430,11 @@ def main():
         root.mkdir()
         draft_fixture(root)
         prepare(args.binary, args.metallib, root, "draft", goldens["draft"])
+        # The MLX-quantized draft: the same layer files, codebooks restored.
+        root = Path(directory) / "draft-quantized"
+        root.mkdir()
+        draft_fixture(root, quantized=True)
+        prepare(args.binary, args.metallib, root, "draft", goldens["draft_quantized"])
         root = Path(directory) / "moe"
         root.mkdir()
         fixture(root, moe=True)

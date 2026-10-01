@@ -13,39 +13,9 @@ using affine::append;
 using affine::copy;
 using affine::image;
 using affine::Image;
-using affine::ProjectionPart;
+using affine::projection;
 using affine::Section;
 using affine::SectionKind;
-
-// Projection parts, stacked in row order, padded with zero rows to `rows`.
-void projection(Image &image, std::initializer_list<std::pair<std::string, uint32_t>> parts,
-                uint32_t rows, uint32_t columns, uint32_t bits = 4, uint32_t experts = 1) {
-  validateQ4Layout(rows, columns);
-  Section section;
-  section.kind = SectionKind::Projection;
-  section.rows = rows;
-  section.columns = columns;
-  section.bits = bits;
-  section.experts = experts;
-  section.bytes = checkedWeightMultiply(uint64_t(rows) * columns * bits / 8 +
-                                        uint64_t(rows) * columns / 16, experts, "affine projection");
-  uint64_t sourceRows = 0;
-  for (const auto &[name, count] : parts) {
-    image.quantized.emplace_back(name, bits);
-    ProjectionPart part{count, {}};
-    for (size_t field = 0; field < 3; ++field) { // weight, scales, biases
-      std::vector<uint64_t> shape{count, field ? columns / kQ4GroupElements : columns * bits / 32};
-      if (experts > 1) shape.insert(shape.begin(), experts);
-      part.fields.push_back({name + (field == 0 ? ".weight" : field == 1 ? ".scales" : ".biases"),
-                             {field ? "BF16" : "U32"}, std::move(shape)});
-    }
-    sourceRows += count;
-    section.parts.push_back(std::move(part));
-  }
-  if (!experts || sourceRows > rows || rows - sourceRows >= kQ4StorageN)
-    throw WeightStoreError("invalid affine projection padding");
-  append(image, std::move(section));
-}
 
 template<class Layout>
 void validateConfiguration(const SafetensorsCheckpoint &source, const Layout &layout) {

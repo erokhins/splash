@@ -19,8 +19,9 @@ else:
 @dataclass(frozen=True)
 class Draft:
     # The repository of the DFlash2 checkpoint trained for the family, as its
-    # release publishes it: config.json and BF16 safetensors. Installations
-    # follow its default branch as they follow the target's.
+    # release publishes it: config.json and BF16 safetensors (--draft-model
+    # also takes an MLX 4-bit conversion of it). Installations follow its
+    # default branch as they follow the target's.
     repo: str
     # The config.json fields, dotted into its objects, that the native draft
     # inspection requires, with the values it requires: a commit stating

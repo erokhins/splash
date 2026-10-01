@@ -2,6 +2,7 @@
 #include "model/AffinePlan.hpp"
 #include "model/DFlashDraft.hpp"
 
+#include <initializer_list>
 #include <string>
 #include <utility>
 #include <vector>
@@ -12,29 +13,49 @@ namespace {
 using affine::copy;
 using affine::Image;
 
-// A projection's BF16 parts, stacked in row order, which the writer quantizes;
-// they fill its rows.
-void quantized(Image &image, std::initializer_list<std::pair<std::string, uint32_t>> parts, uint32_t rows,
-               uint32_t columns) {
+// Whether source stores module as MLX affine Q4 (weight codes, scales and
+// biases), which its scales tensor marks, rather than as the BF16 tensor a
+// DFlash2 release holds. Without a source, for the prepared size, every
+// module is BF16; both forms prepare the same bytes.
+bool storedQuantized(const SafetensorsCheckpoint *source, const std::string &module) {
+  return source && source->find(module + ".scales");
+}
+
+// A projection's parts, stacked in row order, which fill its rows: BF16
+// parts, which the writer quantizes, or MLX Q4 parts, which it retiles.
+void quantized(Image &image, const SafetensorsCheckpoint *source,
+               std::initializer_list<std::pair<std::string, uint32_t>> parts, uint32_t rows, uint32_t columns) {
   validateQ4Layout(rows, columns);
+  uint32_t sourceRows = 0, quantizedParts = 0;
+  for (const auto &[name, count] : parts) {
+    sourceRows += count;
+    quantizedParts += storedQuantized(source, name);
+  }
+  if (sourceRows != rows) throw WeightStoreError("draft projection parts do not fill its rows");
+  if (quantizedParts == parts.size()) return affine::projection(image, parts, rows, columns);
+  if (quantizedParts) throw WeightStoreError("draft projection parts are stored in different formats");
   affine::Section section;
   section.kind = affine::SectionKind::Quantize;
   section.rows = rows;
   section.columns = columns;
   section.bytes = uint64_t(rows) * columns / 2 + uint64_t(rows) * columns / 16;
-  uint32_t sourceRows = 0;
   for (const auto &[name, count] : parts) {
     affine::ProjectionPart part{count, {}};
     part.fields.push_back({name + ".weight", {"BF16"}, {count, columns}});
     section.parts.push_back(std::move(part));
-    sourceRows += count;
   }
-  if (sourceRows != rows) throw WeightStoreError("draft projection parts do not fill its rows");
   affine::append(image, std::move(section));
 }
 
+// A BF16 matrix copied as stored, or restored from its MLX Q4 form.
+void matrix(Image &image, const SafetensorsCheckpoint *source, const std::string &name, uint32_t rows,
+            uint32_t columns) {
+  if (storedQuantized(source, name)) affine::dequantized(image, name, rows, columns);
+  else copy(image, name, {rows, columns});
+}
+
 // The sections of each file in the order DFlashDraft.cpp reads them.
-Image layerImage(const DFlashDraftLayout &layout, uint32_t layer) {
+Image layerImage(const DFlashDraftLayout &layout, const SafetensorsCheckpoint *source, uint32_t layer) {
   Image result = affine::image("layer-" + std::to_string(layer) + ".bin", kDFlashLayerMagic, layer, 0);
   const std::string prefix = "layers." + std::to_string(layer) + ".";
   const std::string attention = prefix + "self_attn.";
@@ -42,40 +63,43 @@ Image layerImage(const DFlashDraftLayout &layout, uint32_t layer) {
   const uint32_t kv = layout.kvHeads * layout.attentionHeadDimension;
   const auto convolution = [&](const std::string &name) {
     copy(result, name + ".base_kernel", {2, 2, hidden});
-    quantized(result, {{name + ".kernel_projection", layout.dynamicSize}}, layout.dynamicSize, hidden);
+    quantized(result, source, {{name + ".kernel_projection", layout.dynamicSize}}, layout.dynamicSize, hidden);
   };
   copy(result, prefix + "input_layernorm.weight", {hidden});
   convolution(prefix + "attention_conv");
-  quantized(result, {{attention + "q_proj", layout.attentionSize}, {attention + "k_proj", kv}, {attention + "v_proj", kv}},
+  quantized(result, source,
+            {{attention + "q_proj", layout.attentionSize}, {attention + "k_proj", kv}, {attention + "v_proj", kv}},
             layout.qkvSize, hidden);
   copy(result, attention + "q_norm.weight", {layout.attentionHeadDimension});
   copy(result, attention + "k_norm.weight", {layout.attentionHeadDimension});
-  quantized(result, {{attention + "o_proj", hidden}}, hidden, layout.attentionSize);
+  quantized(result, source, {{attention + "o_proj", hidden}}, hidden, layout.attentionSize);
   copy(result, prefix + "post_attention_layernorm.weight", {hidden});
   convolution(prefix + "mlp_conv");
-  quantized(result, {{prefix + "mlp.gate_proj", layout.intermediateSize}}, layout.intermediateSize, hidden);
-  quantized(result, {{prefix + "mlp.up_proj", layout.intermediateSize}}, layout.intermediateSize, hidden);
-  quantized(result, {{prefix + "mlp.down_proj", hidden}}, hidden, layout.intermediateSize);
+  quantized(result, source, {{prefix + "mlp.gate_proj", layout.intermediateSize}}, layout.intermediateSize, hidden);
+  quantized(result, source, {{prefix + "mlp.up_proj", layout.intermediateSize}}, layout.intermediateSize, hidden);
+  quantized(result, source, {{prefix + "mlp.down_proj", hidden}}, hidden, layout.intermediateSize);
   return result;
 }
 
-Image modelImage(const DFlashDraftLayout &layout) {
+Image modelImage(const DFlashDraftLayout &layout, const SafetensorsCheckpoint *source) {
   Image result = affine::image("model.bin", kDFlashLayerMagic, layout.layers, 1);
   const std::string selector = "candidate_selector.";
-  quantized(result, {{"fc", layout.hiddenSize}}, layout.hiddenSize, layout.targetHiddenSize);
+  quantized(result, source, {{"fc", layout.hiddenSize}}, layout.hiddenSize, layout.targetHiddenSize);
   copy(result, "hidden_norm.weight", {layout.hiddenSize});
   copy(result, "norm.weight", {layout.hiddenSize});
-  quantized(result, {{selector + "hidden_projection", layout.selectorRank}}, layout.selectorRank, layout.hiddenSize);
-  copy(result, selector + "predecessor_codebook", {layout.vocabularySize, layout.selectorRank});
-  copy(result, selector + "successor_codebook", {layout.vocabularySize, layout.selectorRank});
+  quantized(result, source, {{selector + "hidden_projection", layout.selectorRank}}, layout.selectorRank,
+            layout.hiddenSize);
+  matrix(result, source, selector + "predecessor_codebook", layout.vocabularySize, layout.selectorRank);
+  matrix(result, source, selector + "successor_codebook", layout.vocabularySize, layout.selectorRank);
   return result;
 }
 
-// Every file of a layout: the layers, then model.bin.
-std::vector<Image> draftImages(const DFlashDraftLayout &layout) {
+// Every file of a layout: the layers, then model.bin, each module in the
+// form source stores it.
+std::vector<Image> draftImages(const DFlashDraftLayout &layout, const SafetensorsCheckpoint *source) {
   std::vector<Image> result;
-  for (uint32_t layer = 0; layer < layout.layers; ++layer) result.push_back(layerImage(layout, layer));
-  result.push_back(modelImage(layout));
+  for (uint32_t layer = 0; layer < layout.layers; ++layer) result.push_back(layerImage(layout, source, layer));
+  result.push_back(modelImage(layout, source));
   return result;
 }
 
@@ -92,7 +116,7 @@ struct DraftCheckpointLoader::Impl {
       : backend(backend), source(directory, [&backend] { backend.checkOperation(); }),
         files([&backend] { backend.checkOperation(); }, std::move(admitConversion),
               [this] { source.checkUnchanged(); }) {
-    images = draftImages(layout);
+    images = draftImages(layout, &source);
     for (Image &image : images) {
       backend.checkOperation();
       affine::bind(image, source);
@@ -122,7 +146,7 @@ WeightFile DraftCheckpointLoader::model() { return impl_->open(impl_->images.siz
 
 uint64_t preparedDraftBytes(const DFlashDraftLayout &layout) {
   uint64_t bytes = 0;
-  for (const Image &image : draftImages(layout)) bytes += image.bytes;
+  for (const Image &image : draftImages(layout, nullptr)) bytes += image.bytes;
   return bytes;
 }
 

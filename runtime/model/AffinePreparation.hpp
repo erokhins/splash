@@ -16,7 +16,7 @@
 
 namespace splash::model::affine {
 
-enum class SectionKind { Copy, Decay, Projection, Quantize };
+enum class SectionKind { Copy, Decay, Projection, Quantize, Dequantize };
 
 // A checkpoint tensor a section reads: its name, the dtypes it is read in and
 // its shape, planned from the layout; tensor is bound once the checkpoint is
@@ -29,7 +29,7 @@ struct Input {
 };
 
 // Source rows of a fused projection: its MLX weight, scales and biases
-// (Projection), or its BF16 weight (Quantize).
+// (Projection and Dequantize), or its BF16 weight (Quantize).
 struct ProjectionPart {
   uint32_t rows = 0;
   std::vector<Input> fields;
@@ -41,6 +41,8 @@ struct Section {
   Input input; // Copy and Decay
   // Projection and Quantize: the parts in row order. A Projection's rows past
   // them are zero; a Quantize section has none, nor experts, and 4 bits.
+  // Dequantize: one part of every row of an MLX Q4 tensor, restored to BF16
+  // (scale * code + bias, rounded once), 4 bits and no experts.
   std::vector<ProjectionPart> parts;
   uint32_t rows = 0, columns = 0, experts = 1, bits = 4;
 };

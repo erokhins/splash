@@ -50,6 +50,11 @@
       "draft/layer-0.bin": "283c85c3c12a1777fc05ef1306a45fc3a180963f8477191d49abf09d0a1afb00",
       "draft/layer-1.bin": "5b5b0e09cba0218be18586751d4412ef689db465c1ac3976011365ff575c4d14",
       "draft/model.bin": "377d2766849aa742ad6a1027f9779ec5553b1c5a336a333b309207f26e94f901"
+    },
+    "draft_quantized": {
+      "draft/layer-0.bin": "283c85c3c12a1777fc05ef1306a45fc3a180963f8477191d49abf09d0a1afb00",
+      "draft/layer-1.bin": "5b5b0e09cba0218be18586751d4412ef689db465c1ac3976011365ff575c4d14",
+      "draft/model.bin": "0ae43bb44dc69a4fa074b1d06368affaca3220aaf15a58da92320ca1dc97d17b"
     }
   },
   "vision_image": "f1a165335c42384479f73d83e69146cfa46d4964d66ed13c663b158fed08cdd5"
