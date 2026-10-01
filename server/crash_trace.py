@@ -43,7 +43,13 @@ MAX_TRACE_FILES = 4
 MAX_TRACE_DISK_BYTES = 64 * 1024 * 1024
 REPLAY_TIMEOUT_SECONDS = 600
 SHUTDOWN_GRACE_SECONDS = 15.0
-DEFAULT_TRACE_DIRECTORY = Path.home() / "Library" / "Logs" / "Splash" / "crash"
+# Under SPLASH_DATA when set, which gathers everything Splash writes
+# (install/paths.py); else the per-user log folder.
+DEFAULT_TRACE_DIRECTORY = (
+    Path(os.environ["SPLASH_DATA"]).expanduser() / "logs" / "crash"
+    if os.environ.get("SPLASH_DATA")
+    else Path.home() / "Library" / "Logs" / "Splash" / "crash"
+)
 
 
 @dataclass(frozen=True, slots=True)

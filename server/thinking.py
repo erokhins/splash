@@ -41,11 +41,15 @@ def _read_key(path):
 
 
 def load_thinking_key(path=None):
-    path = (
-        Path.home() / "Library/Application Support/Splash/thinking.key"
-        if path is None
-        else Path(path)
-    )
+    if path is None:
+        # SPLASH_DATA gathers everything Splash writes (install/paths.py).
+        data = os.environ.get("SPLASH_DATA")
+        path = (
+            Path(data).expanduser() / "thinking.key"
+            if data
+            else Path.home() / "Library/Application Support/Splash/thinking.key"
+        )
+    path = Path(path)
     try:
         try:
             return _read_key(path)
