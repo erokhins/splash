@@ -99,7 +99,7 @@ loopback, so use a listener that includes loopback when launching agents locally
 | `--port` | `SPLASH_PORT` or `8000` | HTTP port. |
 | `--max-memory` | Auto | Ceiling on Metal allocations, e.g. `28G`; not combined process RSS. |
 | `--max-context` | Auto | Context limit, up to `256K`, e.g. `100K`. |
-| `--max-cache-disk` | `0` (off) | Session-local SSD cache, e.g. `16G`. See [disk cache](#disk-cache). |
+| `--max-cache-disk` | `0` (off) | SSD cache kept across restarts, e.g. `16G`. See [disk cache](#disk-cache). |
 | `--kv-format` | `int8` | Target KV storage: `int8` or `bf16`. |
 | `--prefill-activations` | `bf16` | Prefill projection activations: `bf16` or `int8`. See [prefill activation precision](#prefill-activation-precision). |
 | `--max-image-pixels` | `4194304` | Maximum resized pixels per image. |
@@ -132,7 +132,8 @@ BF16 avoids target KV quantization, uses approximately twice the target KV
 memory, and can be slower at long contexts. Model weights are unchanged.
 Restart to switch formats. Omit `--kv-format` or use `--kv-format int8` for the
 default. The [SSD cache](#disk-cache) supports both formats, preserving their
-stored bytes without further quantization; it does not survive a restart.
+stored bytes without further quantization; each format has a cache directory
+of its own.
 
 ### Prefill activation precision
 
@@ -305,7 +306,8 @@ See [weight preparation](#weight-preparation) for cache validation and cleanup.
 
 `splash serve --data-dir DIR`, or `SPLASH_DATA=DIR`, puts everything Splash
 writes under one directory: installed models (`models/`), runtime state,
-locks, the catalog cache and agent profiles (`runtime/`), and unless they are
+locks, the catalog cache, agent profiles and the [SSD cache](#disk-cache)
+(`runtime/`, the cache under `runtime/cache/`), and unless they are
 set otherwise the prepared weights (`weights/`, `SPLASH_WEIGHT_CACHE`), Hub
 downloads (`huggingface/`, `HF_HUB_CACHE`, unless `HF_HOME` is set), the
 thinking key and crash traces. The launcher sets these variables for the
@@ -865,7 +867,8 @@ not guarantee that a request-sized allocation fits.
 `--max-cache-disk` adds an optional SSD tier for cached request states (GDN cell
 plus draft ring) and KV pages. Default: `0` (off). RAM and disk copies share the
 same block tree and recency order. Restoring a prefix keeps its disk copy, so
-its next eviction needs no write while that copy remains cached.
+its next eviction needs no write while that copy remains cached. The tier
+[persists across restarts](#persistent-disk-cache).
 
 Without the tier, a request that runs out of memory cannot publish its progress
 checkpoints and replays its prompt after each suspension. With the tier off,
@@ -928,6 +931,47 @@ counters include:
   transfers count once, including those completed before cancellation or a
   resource retry.
 - `lost_state_misses`: lookups that matched KV where a reusable state used to be.
+
+#### Persistent disk cache
+
+The tier's files live under the data directory, `runtime/cache/<namespace>/`
+(`Layout.cache`; the launcher passes `--cache-dir` to the server and the
+engine). The namespace is the engine's cache namespace SHA-256
+(`RuntimeCacheIdentity`): the model and draft bytes, the build id, the KV
+format and page layout, and `--prefill-activations`, all of which change the
+bytes a cached prefix holds. A model re-downloaded at another revision, a
+rebuilt binary or another KV format therefore starts its own directory; the
+old one stays until it is deleted by hand (with Splash stopped, any
+subdirectory of `runtime/cache` can be removed). `--max-memory`,
+`--max-context` and the port do not take part.
+
+A directory holds `kv.slots` and `state.slots`, the two slot files, an
+`index`, a `lock` and, while a server has the directory open, an `open`
+marker. The index records the disk-only chains that lead to a state: each
+block's parent, tokens, image identity and slot, and each state's block,
+slot, checkpoint flag and the model's description of the state (for Qwen,
+its logical lengths), with a SHA-256 over the whole file. It is written only
+at a clean exit (SIGTERM, SIGINT or the parent closing the pipe): the engine
+first evicts everything through the tier (`reclaimCache` with every prefix
+evictable), so states and the KV chains they need go to disk within the
+quota, the newest replacing the oldest copies, for at most 10 s; the server
+sends SIGKILL after 15 s. Then both files are flushed with `F_FULLFSYNC`,
+the index is written to `index.tmp`, flushed and renamed, and the marker is
+removed. The next start adopts the index's slots (`SlotFile::adopt`) as
+disk-only blocks and states; the restore path is the ordinary one for a
+disk-only chain. The quota of the new run bounds what is adopted: the newest
+states with their chains, as many as fit. The `open` marker found at start
+means the previous run never saved, and its index is discarded, as is an
+index that fails validation or names slots beyond its files; the files start
+over then. A directory another server holds (`flock`) gives way to unlinked
+temporary files, as without `--cache-dir`, and that session's cache is not
+kept. `/status` reports `disk.persistent`, `disk.restored_kv_blocks` and
+`disk.restored_states`; the startup log names the directory and what it
+restored, and the exit log what it saved.
+
+The files hold request content in processed form and stay on disk between
+runs; a session that must leave nothing behind runs without the tier, or
+with `SPLASH_DATA` on a volume that is wiped afterwards.
 
 ### Judgment contracts
 

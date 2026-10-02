@@ -129,6 +129,12 @@ public:
         return report_;
     }
 
+    // After serving: moves what the cache holds in RAM to the disk tier, as
+    // far as the quota and the time budget allow, and saves the tier's
+    // index for the next run. Nothing happens without a persistent cache
+    // directory. The result describes what was saved, for the log.
+    [[nodiscard]] std::string persistCache(std::chrono::steady_clock::duration budget);
+
 private:
     RuntimeBootstrap(std::unique_ptr<RuntimeResources> resources,
                      std::unique_ptr<model::RuntimeModel> modelRuntime,

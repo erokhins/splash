@@ -1,9 +1,9 @@
 """Immutable program files and writable per-user data, for source or release.
 
 SPLASH_DATA, or `splash serve --data-dir`, names one directory everything
-Splash writes goes under: models, runtime state and agent profiles (Layout),
-and unless set otherwise the prepared weights, the Hub cache, the thinking
-key and crash traces too (launcher.data_environment). Without it, a release
+Splash writes goes under: models, runtime state, agent profiles and the SSD
+cache (Layout), and unless set otherwise the prepared weights, the Hub cache,
+the thinking key and crash traces too (launcher.data_environment). Without it, a release
 writes under ~/Library/Application Support/Splash and a source checkout under
 itself.
 """
@@ -35,6 +35,12 @@ class Layout:
     def weights(self) -> Path:
         """Where the engine prepares weights unless SPLASH_WEIGHT_CACHE says."""
         return self.data / "weights"
+
+    @property
+    def cache(self) -> Path:
+        """Where the engine keeps the SSD cache of --max-cache-disk across
+        runs, one subdirectory per model and configuration."""
+        return self.runtime / "cache"
 
     @property
     def hub_cache(self) -> Path:

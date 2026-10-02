@@ -1,6 +1,7 @@
 #include "model/SlotFile.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <future>
 #include <csignal>
 #include <sys/resource.h>
@@ -21,6 +22,63 @@ template <typename Exception, typename Call>
 static bool throws(Call call) {
   try { call(); } catch (const Exception &) { return true; }
   return false;
+}
+
+// A named file keeps its slots for the next open, which takes back the
+// ones its index names and starts the rest over.
+static void testPersistentFileKeepsSlotsAcrossOpens() {
+  constexpr size_t size = SlotFile::kAlignmentBytes;
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("splash-slot-file-" + std::to_string(getpid()));
+  std::filesystem::create_directories(directory);
+  const auto path = directory / "kv.slots";
+  std::vector<std::byte> one(size, std::byte{1}), two(size, std::byte{2}), output(size);
+  uint32_t kept = 0;
+  {
+    auto file = SlotFile::persistent(size, std::make_shared<DiskBudget>(4 * size), path);
+    auto first = file->acquire();
+    auto second = file->acquire();
+    auto third = file->acquire();
+    require(first && second && third, "persistent file handed out no slots");
+    require(file->write(first, {one}, {})->wait() && file->write(second, {two}, {})->wait() &&
+                file->write(third, {one}, {})->wait() && file->flush()->wait(),
+            "persistent writes or flush failed");
+    kept = second->index();
+    require(first->index() != kept && third->index() != kept && kept < 3,
+            "slot indices were not distinct positions");
+  }
+  require(std::filesystem::file_size(path) == 3 * size, "the file did not keep its slots");
+  {
+    auto file = SlotFile::persistent(size, std::make_shared<DiskBudget>(4 * size), path);
+    const uint32_t indices[] = {kept};
+    auto adopted = file->adopt(indices);
+    require(adopted.size() == 1 && adopted[0]->index() == kept && file->usedBytes() == size,
+            "adoption did not take the slot");
+    require(file->read(adopted[0], {output}, {})->wait() && output.front() == std::byte{2} &&
+                output.back() == std::byte{2},
+            "adopted slot lost its data");
+    require(std::filesystem::file_size(path) == (kept + 1) * size,
+            "the file was not cut after the last adopted slot");
+    auto fresh = file->acquire();
+    require(fresh && fresh->index() != kept, "the adopted slot was handed out again");
+    require(throws<std::logic_error>([&] { static_cast<void>(file->adopt(indices)); }),
+            "adoption after a slot was handed out was accepted");
+  }
+  {
+    auto file = SlotFile::persistent(size, std::make_shared<DiskBudget>(size), path);
+    const uint32_t beyond[] = {0, 1};
+    require(file->adopt(beyond).empty() && file->usedBytes() == 0,
+            "adoption beyond the budget changed the file");
+    const uint32_t unsorted[] = {1, 0};
+    require(throws<std::invalid_argument>([&] { static_cast<void>(file->adopt(unsorted)); }),
+            "unsorted adoption was accepted");
+    require(file->adopt({}).empty() && std::filesystem::file_size(path) == 0,
+            "adopting nothing did not start the file over");
+    auto slot = file->acquire();
+    require(slot && slot->index() == 0 && file->write(slot, {one}, {})->wait(),
+            "the restarted file took no slot");
+  }
+  std::filesystem::remove_all(directory);
 }
 
 static void testFailedWriteStopsWriting() {
@@ -70,6 +128,7 @@ static void testFailedWriteStopsWriting() {
 int main() {
   try {
     testFailedWriteStopsWriting();
+    testPersistentFileKeepsSlotsAcrossOpens();
     constexpr size_t size = 4 * SlotFile::kAlignmentBytes;
     SlotFile file(size, size * 2 + 1);
     require(file.slotBytes() == size && file.capacityBytes() == size * 2 + 1 &&

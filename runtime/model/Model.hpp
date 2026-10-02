@@ -295,6 +295,16 @@ struct StateAllocationTracker final {
   std::atomic<uint64_t> bytes{0};
 };
 
+// A state's disk copy as a saved cache index records it: its slot in the
+// state file and the model's own description of the state, opaque to the
+// engine.
+struct PersistedState final {
+  uint32_t slot = 0;
+  std::array<uint64_t, 4> metadata{};
+
+  bool operator==(const PersistedState &) const = default;
+};
+
 class StateStorage {
 public:
   virtual ~StateStorage() = default;
@@ -303,6 +313,15 @@ public:
   // bytes released. Active lanes and cached states are never touched.
   [[nodiscard]] virtual uint64_t releaseIdle(uint32_t keepCells,
                                              uint32_t keepRings) noexcept = 0;
+  // The record of a state's disk copy, for a state that is one; empty for a
+  // RAM copy or without a persistent state file.
+  [[nodiscard]] virtual std::optional<PersistedState>
+  persisted(const CompositeState &) const { return std::nullopt; }
+  // Takes back the disk copies a saved index records, ascending by slot,
+  // as disk-only states in that order. Empty when the file cannot hold them
+  // all; throws when a record does not describe a state of this model.
+  [[nodiscard]] virtual std::vector<std::shared_ptr<const CompositeState>>
+  adoptPersisted(std::span<const PersistedState>) { return {}; }
 };
 
 // One slot of the disk tier holding a KV page; releasing the last handle
@@ -354,6 +373,12 @@ public:
   [[nodiscard]] virtual bool copiesQueued() const noexcept = 0;
   // Engine-thread bookkeeping after commands and IO complete.
   virtual void poll() = 0;
+  // Persistence: the position of a copy in the tier's file, and the copies
+  // a saved index records, ascending without repeats, taken back in that
+  // order; empty when the quota cannot hold them all.
+  [[nodiscard]] virtual uint32_t slotIndex(const KvDiskSlot &) const = 0;
+  [[nodiscard]] virtual std::vector<std::shared_ptr<KvDiskSlot>>
+  adoptSlots(std::span<const uint32_t> indices) = 0;
 };
 
 // Startup sizing and observability are part of the concrete model runtime,

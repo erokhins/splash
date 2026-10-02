@@ -439,6 +439,74 @@ void KvCache::erase(uint64_t blockId) {
     pool_.releasePage(page, true);
 }
 
+uint64_t KvCache::insertDisk(uint64_t parentBlock, std::span<const uint32_t> tokens,
+                             ImageIdentity images, std::shared_ptr<model::KvDiskSlot> slot,
+                             bool hadState) {
+  if (tokens.size() != pageTokens)
+    throw std::invalid_argument("KV cache block must contain one full page");
+  if (!slot)
+    throw std::invalid_argument("a disk-only KV cache block needs its disk copy");
+  if (find(parentBlock, tokens, images))
+    throw std::invalid_argument("KV cache block is already present");
+  if (parentBlock && !blocks_.contains(parentBlock))
+    throw std::invalid_argument("KV cache parent block is unknown");
+  if (parentBlock && block(parentBlock).children == std::numeric_limits<uint32_t>::max())
+    throw std::overflow_error("KV cache child count overflowed");
+  if (!nextBlockId_ || nextBlockId_ == std::numeric_limits<uint64_t>::max())
+    throw std::overflow_error("KV cache block ids exhausted");
+
+  Block entry;
+  entry.id = nextBlockId_;
+  entry.parent = parentBlock;
+  entry.indexHash = indexHash(parentBlock ? block(parentBlock).indexHash : 0, tokens, images);
+  std::copy(tokens.begin(), tokens.end(), entry.tokens.begin());
+  entry.images = images;
+  entry.slot = std::move(slot);
+  entry.hadState = hadState;
+  entry.depth = parentBlock ? block(parentBlock).depth + 1 : 1;
+  entry.ramNode = RecencyOrder::allocate(entry.id);
+  entry.diskNode = RecencyOrder::allocate(entry.id);
+  auto [position, unique] = blocks_.emplace(entry.id, std::move(entry));
+  if (!unique)
+    throw std::logic_error("duplicate KV cache block id");
+  try {
+    index_.emplace(position->second.indexHash, position->first);
+  } catch (...) {
+    blocks_.erase(position);
+    throw;
+  }
+  const uint64_t id = nextBlockId_++;
+  ++diskBlocks_;
+  Block &placed = block(id);
+  if (parentBlock) {
+    Block &parent = block(parentBlock);
+    ++parent.children;
+    if (parent.firstChild)
+      block(parent.firstChild).previousSibling = id;
+    placed.nextSibling = parent.firstChild;
+    parent.firstChild = id;
+    reindex(parent);
+  }
+  placed.lastUsed = recency_.next();
+  reindex(placed);
+  ++generation_;
+  return id;
+}
+
+void KvCache::visit(const std::function<void(const BlockView &)> &visitor) const {
+  // Ids increase from parent to child.
+  std::vector<uint64_t> ids;
+  ids.reserve(blocks_.size());
+  for (const auto &[id, _] : blocks_)
+    ids.push_back(id);
+  std::sort(ids.begin(), ids.end());
+  for (uint64_t id : ids) {
+    const Block &entry = block(id);
+    visitor({entry.id, entry.parent, entry.tokens, entry.images, entry.slot.get(),
+             entry.page != noPage, entry.transferring, entry.poisoned, entry.hadState});
+  }
+}
+
 KvCache::Snapshot KvCache::snapshot() const noexcept {
   const uint64_t count = residentBlocks_;
   const uint64_t bytes =

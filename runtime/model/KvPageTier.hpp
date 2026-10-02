@@ -62,6 +62,9 @@ public:
           std::function<void()> completion) override;
   [[nodiscard]] bool copiesQueued() const noexcept override;
   void poll() override;
+  [[nodiscard]] uint32_t slotIndex(const KvDiskSlot &slot) const override;
+  [[nodiscard]] std::vector<std::shared_ptr<KvDiskSlot>>
+  adoptSlots(std::span<const uint32_t> indices) override;
 
   // Runtime side. encode() appends every queued copy to the command being
   // built and returns the report the command's completion runs, from any

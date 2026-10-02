@@ -2,9 +2,11 @@
 
 #include "model/Model.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace splash::test {
@@ -25,7 +27,7 @@ public:
   bool canDemote() const noexcept override { return writableFile && staging < stagingSlots; }
   std::shared_ptr<model::KvDiskSlot> acquireSlot() override {
     if (slots >= capacity) return {};
-    return std::make_shared<Slot>(*this);
+    return std::make_shared<Slot>(*this, nextIndex++);
   }
   std::unique_ptr<model::KvTransfer>
   demote(uint32_t, std::shared_ptr<model::KvDiskSlot>, std::function<void()>) override {
@@ -41,6 +43,21 @@ public:
   }
   bool copiesQueued() const noexcept override { return queued; }
   void poll() override {}
+  // Persistence: each slot carries the index it was adopted with, or the
+  // next free one.
+  uint32_t slotIndex(const model::KvDiskSlot &slot) const override {
+    return static_cast<const Slot &>(slot).index;
+  }
+  std::vector<std::shared_ptr<model::KvDiskSlot>>
+  adoptSlots(std::span<const uint32_t> indices) override {
+    std::vector<std::shared_ptr<model::KvDiskSlot>> result;
+    if (slots + indices.size() > capacity) return result;
+    for (uint32_t index : indices) {
+      result.push_back(std::make_shared<Slot>(*this, index));
+      nextIndex = std::max(nextIndex, index + 1);
+    }
+    return result;
+  }
 
   // Finishes every transfer still in flight.
   void complete(bool success = true) {
@@ -65,13 +82,15 @@ public:
   uint32_t restores = 0;
   bool writableFile = true;
   bool queued = false;
+  uint32_t nextIndex = 0;
   std::vector<std::shared_ptr<Transfer>> transfers;
 
 private:
   struct Slot final : model::KvDiskSlot {
-    explicit Slot(TestKvTier &owner) : tier(owner) { ++tier.slots; }
+    Slot(TestKvTier &owner, uint32_t position) : tier(owner), index(position) { ++tier.slots; }
     ~Slot() override { --tier.slots; }
     TestKvTier &tier;
+    uint32_t index;
   };
   class Ticket final : public model::KvTransfer {
   public:

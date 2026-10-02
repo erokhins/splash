@@ -1945,6 +1945,9 @@ def parse_args(argv=None):
         type=_parse_max_cache_disk,
         default=0,
     )
+    # Where the engine keeps that cache across runs; without it the cache
+    # lasts the session.
+    parser.add_argument("--cache-dir", dest="cache_dir", default=None)
     parser.add_argument("--max-image-pixels", type=int, default=image_input.MAX_PIXELS)
     parser.add_argument("--max-new-tokens", type=int, default=32768)
     parser.add_argument("--request-timeout", type=float, default=1800)
@@ -2008,6 +2011,8 @@ def _native_command(args):
         command.extend(("--kv-format", args.kv_format))
     if args.prefill_activations != "bf16":
         command.extend(("--prefill-activations", args.prefill_activations))
+    if args.max_cache_disk and args.cache_dir:
+        command.extend(("--cache-dir", args.cache_dir))
     return command
 
 

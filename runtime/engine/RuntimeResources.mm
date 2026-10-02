@@ -116,6 +116,7 @@ canonicalRuntimeCacheNamespace(const RuntimeCacheIdentity &identity) {
             << '\n'
             << "build_id_bytes=" << identity.buildId.size() << '\n'
             << "build_id=" << identity.buildId << '\n'
+            << "int8_prefill_roles=" << unsigned{identity.int8PrefillRoles} << '\n'
             << "dtype=" << kv::storageFormatName(identity.kvLayout.format()) << '\n'
             << "page_tokens=" << identity.kvLayout.pageTokens << '\n'
             << "elements_per_scale=" << identity.kvLayout.elementsPerScale
@@ -176,7 +177,7 @@ RuntimeCacheIdentity
 makeRuntimeCacheIdentity(std::string_view combinedManifestSha256,
                          std::string_view targetManifestSha256,
                          std::string_view buildId,
-                         kv::Layout targetKvLayout) {
+                         kv::Layout targetKvLayout, uint8_t int8PrefillRoles) {
   if (buildId.empty()) {
     throw std::invalid_argument("runtime build id is required");
   }
@@ -190,6 +191,7 @@ makeRuntimeCacheIdentity(std::string_view combinedManifestSha256,
   RuntimeCacheIdentity result;
   result.modelLayoutSha256 = digestHex(combinedDigest);
   result.buildId = buildId;
+  result.int8PrefillRoles = int8PrefillRoles;
   result.kvLayout = kv::makeLayoutGuard(targetKvLayout, targetDigest);
   result.namespaceSha256 = canonicalRuntimeCacheNamespace(result);
   result.cacheNamespace.digest = parseSha256(result.namespaceSha256);
@@ -216,8 +218,10 @@ RuntimeResources::RuntimeResources(
     std::unique_ptr<model::StateStorage> stateStorage,
     std::unique_ptr<model::KvPageTier> kvTier,
     std::unique_ptr<KvPool> kvPool, std::unique_ptr<engine::Cache> cache,
+    std::unique_ptr<PersistentCacheDirectory> persistentCache,
     uint32_t maximumImagePatches, std::optional<uint64_t> hostAvailableAtStart)
-    : backend_(std::move(backend)), model_(std::move(model)),
+    : persistentCache_(std::move(persistentCache)),
+      backend_(std::move(backend)), model_(std::move(model)),
       operators_(std::move(operators)),
       memoryPlan_(std::move(memoryPlan)),
       modelMemoryPlan_(std::move(modelMemoryPlan)),
@@ -411,7 +415,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
     cacheIdentity = makeRuntimeCacheIdentity(
         package.manifestFingerprintSha256,
         package.targetManifestFingerprint(), config.buildId,
-        package.targetKvLayout(config.kvFormat));
+        package.targetKvLayout(config.kvFormat), config.int8PrefillRoles);
   } catch (const std::exception &error) {
     throw RuntimeResourcesError(RuntimeResourceStage::ModelLoading,
                                 error.what(), memoryPlan.toStatusJson(),
@@ -472,14 +476,41 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
     // disk KV cannot preserve a restorable prefix, so the tier stays off.
     std::shared_ptr<model::DiskBudget> diskBudget;
     std::shared_ptr<model::SlotFile> stateFile;
+    std::shared_ptr<model::SlotFile> kvFile;
+    std::unique_ptr<PersistentCacheDirectory> persistentCache;
     const uint64_t stateBytes = package.stateLayout().cachedBytes();
+    const uint64_t slotBytes = model::KvPageTier::slotBytesFor(*kvPages);
     if (config.maximumCacheDiskBytes) {
       diskBudget = std::make_shared<model::DiskBudget>(config.maximumCacheDiskBytes);
-      try {
-        stateFile = std::make_shared<model::SlotFile>(stateBytes, diskBudget);
-      } catch (const std::exception &error) {
-        diskBudget.reset();
-        logKernelStartup("Cache disk tier disabled (", error.what(), ").");
+      // The files under the cache directory outlive the process; held by
+      // another server, or unusable, they give way to this session's own.
+      if (!config.cacheDirectory.empty()) {
+        try {
+          persistentCache = PersistentCacheDirectory::open(
+              {config.cacheDirectory, cacheIdentity.namespaceSha256,
+               cacheIdentity.cacheNamespace, slotBytes, stateBytes, diskBudget});
+          if (persistentCache) {
+            kvFile = persistentCache->kvFile();
+            stateFile = persistentCache->stateFile();
+          } else {
+            logKernelStartup("Cache directory ",
+                             (config.cacheDirectory / cacheIdentity.namespaceSha256).string(),
+                             " is held by another server; this session's cache is not kept.");
+          }
+        } catch (const std::exception &error) {
+          logKernelStartup("Cache directory unavailable (", error.what(),
+                           "); this session's cache is not kept.");
+        }
+      }
+      if (!stateFile) {
+        try {
+          stateFile = std::make_shared<model::SlotFile>(stateBytes, diskBudget);
+        } catch (const std::exception &error) {
+          diskBudget.reset();
+          persistentCache.reset();
+          kvFile.reset();
+          logKernelStartup("Cache disk tier disabled (", error.what(), ").");
+        }
       }
     }
     std::unique_ptr<model::StateStorage> stateStorage = model::createStateStorage(
@@ -490,9 +521,9 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
     std::unique_ptr<model::KvPageTier> kvTier;
     if (diskBudget) {
       try {
-        const uint64_t slotBytes = model::KvPageTier::slotBytesFor(*kvPages);
-        kvTier = std::make_unique<model::KvPageTier>(
-            *backend, *kvPages, std::make_shared<model::SlotFile>(slotBytes, diskBudget));
+        if (!kvFile)
+          kvFile = std::make_shared<model::SlotFile>(slotBytes, diskBudget);
+        kvTier = std::make_unique<model::KvPageTier>(*backend, *kvPages, kvFile);
         logKernelStartup("Cache disk tier: ", config.maximumCacheDiskBytes / kMiB,
                          " MiB for KV pages of ", slotBytes / 1024, " KiB and states of ",
                          stateBytes / kMiB, " MiB; KV pages stage through ",
@@ -506,6 +537,18 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
     auto kvPool = std::make_unique<KvPool>(*kvPages);
     auto cache = std::make_unique<engine::Cache>(*kvPool, cacheIdentity.cacheNamespace,
                                                  kvTier.get(), diskBudget);
+    if (persistentCache && kvTier) {
+      cache->markPersistent();
+      const CacheRestoreReport restored =
+          restorePersistentCache(*persistentCache, *cache, *stateStorage);
+      logKernelStartup("Cache disk tier persists under ", persistentCache->path().string(),
+                       persistentCache->recoveredFromCrash()
+                           ? "; the previous run did not close it, so its cache was discarded"
+                           : "",
+                       "; restored ", restored.states, " states on ", restored.blocks,
+                       " KV blocks", restored.note.empty() ? "" : " (",
+                       restored.note, restored.note.empty() ? "" : ")", ".");
+    }
 
     if (kvPages->declaredBytes() != budget.kvVirtualBytes ||
         kvPages->actualAllocatedBytes() > budget.kvVirtualBytes) {
@@ -532,7 +575,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
         std::move(memoryPlan),
         std::move(modelMemoryPlan), std::move(cacheIdentity),
         std::move(memoryGovernor), std::move(kvPages), std::move(stateStorage),
-        std::move(kvTier), std::move(kvPool), std::move(cache),
+        std::move(kvTier), std::move(kvPool), std::move(cache), std::move(persistentCache),
         config.maximumImagePatches, hostAvailableAtStart));
     return result;
   } catch (const metal::MetalAllocationError &error) {

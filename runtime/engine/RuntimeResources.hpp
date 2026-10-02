@@ -3,6 +3,7 @@
 #include "ops/Vision.hpp"
 #include "engine/MemoryPlan.hpp"
 #include "engine/Cache.hpp"
+#include "engine/CachePersistence.hpp"
 #include "engine/MemoryGovernor.hpp"
 #include "model/KvPageTier.hpp"
 #include "ops/PageStorage.hpp"
@@ -49,6 +50,9 @@ digestHex(const std::array<uint8_t, 32> &digest) {
 struct RuntimeCacheIdentity {
   std::string modelLayoutSha256;
   std::string buildId;
+  // The prefill projections on int8 activations (ops::Int8PrefillRole
+  // bits): they change the numerics of what the cache holds.
+  uint8_t int8PrefillRoles = 0;
   // One process-wide content namespace. KV blocks never copy model/build
   // strings or physical layout metadata.
   CacheNamespace cacheNamespace;
@@ -62,7 +66,8 @@ struct RuntimeCacheIdentity {
 makeRuntimeCacheIdentity(std::string_view combinedManifestSha256,
                          std::string_view targetManifestSha256,
                          std::string_view buildId,
-                         kv::Layout targetKvLayout);
+                         kv::Layout targetKvLayout,
+                         uint8_t int8PrefillRoles = 0);
 
 // The memory plan counts each weight category from the loaded package, so
 // every category the model has must report its allocation and identity.
@@ -81,6 +86,10 @@ struct RuntimeResourcesConfig {
   uint64_t maximumMemoryBytes = 0;
   // Disk quota shared by cached KV pages and states; zero disables the tier.
   uint64_t maximumCacheDiskBytes = 0;
+  // Where the tier keeps its files across runs, one subdirectory per cache
+  // namespace (--cache-dir); empty keeps them in unlinked temporary files
+  // that go with the process.
+  std::filesystem::path cacheDirectory;
   // Patches per image the vision scratch covers. The engine admits images up
   // to it when the model loaded vision and none otherwise; the wire parser's
   // limit defaults to the same constant.
@@ -178,6 +187,11 @@ public:
   [[nodiscard]] const RuntimeCacheIdentity &cacheIdentity() const noexcept {
     return cacheIdentity_;
   }
+  // The directory the disk tier persists in; null when the tier is off,
+  // keeps no files, or found its directory held by another server.
+  [[nodiscard]] PersistentCacheDirectory *persistentCache() noexcept {
+    return persistentCache_.get();
+  }
   // What other applications left, measured before the engine took any;
   // empty when the host could not be measured.
   [[nodiscard]] std::optional<uint64_t> hostAvailableAtStart() const noexcept {
@@ -209,9 +223,13 @@ private:
                    std::unique_ptr<model::KvPageTier> kvTier,
                    std::unique_ptr<KvPool> kvPool,
                    std::unique_ptr<engine::Cache> cache,
+                   std::unique_ptr<PersistentCacheDirectory> persistentCache,
                    uint32_t maximumImagePatches,
                    std::optional<uint64_t> hostAvailableAtStart);
 
+  // First, so that it outlives the files' other owners and releases the
+  // directory's lock last.
+  std::unique_ptr<PersistentCacheDirectory> persistentCache_;
   std::unique_ptr<metal::MetalBackend> backend_;
   model::ModelPackage model_;
   ops::ExecutionPlans operators_;

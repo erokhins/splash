@@ -263,6 +263,7 @@ def serve(args):
             command.extend(["--max-request-size", str(args.max_request_size)])
         if args.max_cache_disk:
             command.extend(["--max-cache-disk", str(args.max_cache_disk)])
+            command.extend(["--cache-dir", str(layout.cache)])
         if args.max_image_pixels is not None:
             command.extend(["--max-image-pixels", str(args.max_image_pixels)])
         if args.no_webui:

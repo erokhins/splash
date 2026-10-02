@@ -40,6 +40,7 @@ namespace {
 // failures remain immediate and fail-closed.
 constexpr auto kStartupMemoryRecoveryTimeout = std::chrono::seconds(30);
 constexpr auto kStartupMemoryRecoveryPoll = std::chrono::seconds(1);
+constexpr auto kCachePersistenceBudget = std::chrono::seconds(10);
 class UsageError final : public std::runtime_error {
 public:
   using std::runtime_error::runtime_error;
@@ -51,6 +52,7 @@ struct NativeArguments final {
   uint32_t maxContext = 0;
   uint64_t maxMemoryBytes = 0;
   uint64_t maxCacheDiskBytes = 0;
+  std::filesystem::path cacheDirectory;
   kv::Format kvFormat = kv::Format::Int8;
   uint8_t int8PrefillRoles = 0;
 };
@@ -123,7 +125,8 @@ void printUsage(std::string_view executable) {
   std::cerr << "usage: " << executable
             << " serve-native TARGET_DIRECTORY DRAFT_DIRECTORY"
                " MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto [MAX_CACHE_DISK_BYTES]"
-               " [--kv-format int8|bf16]\n";
+               " [--kv-format int8|bf16] [--prefill-activations bf16|int8]"
+               " [--cache-dir DIR]\n";
 }
 
 template <typename T>
@@ -193,12 +196,18 @@ NativeArguments parseArguments(int argc, char **argv) {
     if (quota != "0" && !parsePositive(quota, result.maxCacheDiskBytes))
       throw UsageError("MAX_CACHE_DISK_BYTES must be a nonnegative integer");
   }
+  constexpr std::string_view kOptions =
+      "expected --kv-format int8|bf16, --prefill-activations bf16|int8 or --cache-dir DIR";
   while (next < argc) {
     const std::string_view option(argv[next]);
     if (next + 1 >= argc)
-      throw UsageError("expected --kv-format int8|bf16 or --prefill-activations bf16|int8");
+      throw UsageError(std::string(kOptions));
     const std::string_view value(argv[next + 1]);
-    if (option == "--kv-format") {
+    if (option == "--cache-dir") {
+      if (value.empty())
+        throw UsageError("--cache-dir requires a directory");
+      result.cacheDirectory = std::filesystem::path(value);
+    } else if (option == "--kv-format") {
       if (value != "int8" && value != "bf16")
         throw UsageError("--kv-format requires int8 or bf16");
       result.kvFormat = value == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
@@ -222,7 +231,7 @@ NativeArguments parseArguments(int argc, char **argv) {
         }
       }
     } else {
-      throw UsageError("expected --kv-format int8|bf16 or --prefill-activations bf16|int8");
+      throw UsageError(std::string(kOptions));
     }
     next += 2;
   }
@@ -272,6 +281,7 @@ bootstrapConfig(const NativeArguments &arguments) {
   config.resources.buildId = SPLASH_BUILD_ID;
   config.resources.maximumMemoryBytes = arguments.maxMemoryBytes;
   config.resources.maximumCacheDiskBytes = arguments.maxCacheDiskBytes;
+  config.resources.cacheDirectory = arguments.cacheDirectory;
   config.resources.kvFormat = arguments.kvFormat;
   config.resources.int8PrefillRoles = arguments.int8PrefillRoles;
   config.nativeLoop.engine.maxContext = arguments.maxContext;
@@ -427,6 +437,13 @@ int runNative(const NativeArguments &arguments) {
            reclaim.outcome == engine::ReclaimOutcome::Pending;
   });
   const auto exit = transport.run(bootstrap->nativeLoop());
+  // The server escalates to SIGKILL 15 s after closing the pipe; the flush
+  // stops well before that and saves what has reached the disk.
+  if (bootstrap->nativeLoop().engineHealthy()) {
+    const std::string persisted = bootstrap->persistCache(kCachePersistenceBudget);
+    if (!persisted.empty())
+      std::cerr << "Cache disk tier: " << persisted << ".\n";
+  }
   switch (exit) {
   case engine::NativeProcessExit::CleanEof:
     break;

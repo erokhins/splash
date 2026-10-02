@@ -187,6 +187,12 @@ void testRuntimeCacheNamespaceBindsIdentityOnce() {
   require(first.cacheNamespace != formatChanged.cacheNamespace &&
               first.namespaceSha256 != formatChanged.namespaceSha256,
           "INT8 and BF16 aliased the same prefix-cache namespace");
+  // Int8 prefill activations change the numerics of what the cache holds.
+  const auto activationsChanged = engine::makeRuntimeCacheIdentity(
+      combinedA, targetA, "build-a", kvLayout, ops::kAllInt8PrefillRoles);
+  require(first.cacheNamespace != activationsChanged.cacheNamespace &&
+              activationsChanged.int8PrefillRoles == ops::kAllInt8PrefillRoles,
+          "prefill activation precision did not change the prefix-cache namespace");
   require(first.cacheNamespace == same.cacheNamespace &&
               first.namespaceSha256 == same.namespaceSha256,
           "runtime cache namespace is not deterministic");

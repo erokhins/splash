@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <limits>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -462,6 +463,47 @@ std::unique_ptr<StateRestore> QwenStateStorage::beginRestore(
     operation->drain();
     throw;
   }
+}
+
+std::optional<PersistedState>
+QwenStateStorage::persisted(const CompositeState &state) const {
+  const auto *typed = dynamic_cast<const QwenCompositeState *>(&state);
+  if (!typed || !typed->disk_ || !file_ || typed->file_ != file_)
+    return std::nullopt;
+  const QwenLogicalLengths &lengths = typed->lengths_;
+  return PersistedState{typed->disk_->index(),
+                        {lengths.targetTokens, lengths.draftBase, lengths.draftLength,
+                         lengths.draftCommitCursor}};
+}
+
+std::vector<std::shared_ptr<const CompositeState>>
+QwenStateStorage::adoptPersisted(std::span<const PersistedState> records) {
+  std::vector<std::shared_ptr<const CompositeState>> result;
+  if (!file_ || records.empty())
+    return result;
+  std::vector<uint32_t> indices;
+  std::vector<QwenLogicalLengths> lengths;
+  indices.reserve(records.size());
+  lengths.reserve(records.size());
+  for (const PersistedState &record : records) {
+    if (record.metadata[2] > std::numeric_limits<uint32_t>::max() ||
+        record.metadata[3] > std::numeric_limits<uint32_t>::max())
+      throw std::invalid_argument("persisted draft lengths exceed their range");
+    const QwenLogicalLengths restored{record.metadata[0], record.metadata[1],
+                                      static_cast<uint32_t>(record.metadata[2]),
+                                      static_cast<uint32_t>(record.metadata[3])};
+    validateLengths(restored, true);
+    indices.push_back(record.slot);
+    lengths.push_back(restored);
+  }
+  std::vector<std::shared_ptr<SlotFile::Slot>> slots = file_->adopt(indices);
+  if (slots.empty())
+    return result;
+  result.reserve(slots.size());
+  for (size_t index = 0; index < slots.size(); ++index)
+    result.push_back(std::shared_ptr<const QwenCompositeState>(
+        new QwenCompositeState(layout_, lengths[index], file_, std::move(slots[index]))));
+  return result;
 }
 
 uint64_t QwenStateStorage::actualSlotBytes(uint32_t index) const {

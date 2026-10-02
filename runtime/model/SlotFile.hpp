@@ -51,8 +51,10 @@ private:
   std::atomic<uint64_t> written_{0};
 };
 
-// Scratch storage of fixed-size slots in an unlinked temporary file, served
-// by one IO worker in submission order and bounded by a disk budget. Callers
+// Storage of fixed-size slots in a file, served by one IO worker in
+// submission order and bounded by a disk budget. The file is an unlinked
+// temporary one, gone with the process, or a named one kept across runs
+// (persistent()), whose slots a saved index takes back with adopt(). Callers
 // own the memory an operation moves and keep it alive until the operation is
 // ready. A slot is readable only after one complete write; a failed or
 // cancelled write leaves it unreadable, and after a failed write the file
@@ -70,6 +72,8 @@ public:
     ~Slot();
     Slot(const Slot &) = delete;
     Slot &operator=(const Slot &) = delete;
+    // The slot's position in the file, what a saved index records.
+    [[nodiscard]] uint32_t index() const noexcept { return index_; }
 
   private:
     friend class SlotFile;
@@ -109,11 +113,25 @@ public:
   // A file with a budget of its own.
   SlotFile(uint64_t slotBytes, uint64_t capacityBytes,
            const std::filesystem::path &directory = std::filesystem::temp_directory_path());
+  // The named file, created when missing and kept when the object goes.
+  // Every slot starts free: adopt() takes back the ones a saved index names.
+  [[nodiscard]] static std::unique_ptr<SlotFile>
+  persistent(uint64_t slotBytes, std::shared_ptr<DiskBudget> budget,
+             const std::filesystem::path &file);
   ~SlotFile();
   SlotFile(const SlotFile &) = delete;
   SlotFile &operator=(const SlotFile &) = delete;
   // Null when the budget is exhausted.
   [[nodiscard]] std::shared_ptr<Slot> acquire();
+  // Takes back the slots a saved index names, in ascending order without
+  // repeats, as written slots, on a file no slot of which has been handed
+  // out. Every lower index not named is free; the file is cut after the
+  // last one. Empty, leaving the file as it was, when the budget cannot hold
+  // them all: the caller trims what it adopts to the quota first.
+  [[nodiscard]] std::vector<std::shared_ptr<Slot>> adopt(std::span<const uint32_t> indices);
+  // Pushes the slots written so far through to the device (F_FULLFSYNC),
+  // after the operations submitted before it.
+  [[nodiscard]] std::shared_ptr<Operation> flush();
   [[nodiscard]] uint64_t slotBytes() const noexcept;
   // The shared budget's capacity and use.
   [[nodiscard]] uint64_t capacityBytes() const noexcept;
@@ -140,6 +158,8 @@ private:
     std::function<bool(const std::atomic<bool> &)> run;
     std::function<void()> completion;
   };
+  // Takes over an open descriptor.
+  SlotFile(uint64_t slotBytes, std::shared_ptr<DiskBudget> budget, int descriptor);
   [[nodiscard]] std::shared_ptr<Operation> submit(
       std::function<bool(const std::atomic<bool> &)> work,
       std::function<void()> completion);

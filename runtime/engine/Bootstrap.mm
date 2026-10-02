@@ -2,9 +2,11 @@
 #include "engine/StartupLog.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 namespace splash::engine {
@@ -116,6 +118,48 @@ RuntimeBootstrap::RuntimeBootstrap(std::unique_ptr<RuntimeResources> resources,
 RuntimeBootstrap::~RuntimeBootstrap() {
   // Cancel unsubmitted dependency waits before the loop destroys its tickets.
   resources_->backend().stop();
+}
+
+std::string RuntimeBootstrap::persistCache(std::chrono::steady_clock::duration budget) {
+  PersistentCacheDirectory *directory = resources_->persistentCache();
+  if (!directory)
+    return {};
+  // Evict everything: states and the KV chains they need go through the
+  // tier, the newest replacing the oldest copies once the quota is full.
+  // Ticks land the transfers and submit copy-only commands; the pass runs
+  // again while a release or a transfer holds it back.
+  const auto deadline = std::chrono::steady_clock::now() + budget;
+  bool complete = false;
+  try {
+    for (;;) {
+      MemoryReclaimDirective directive;
+      directive.reclaimEmptyKvExtents = true;
+      directive.evictAllUnpinnedPrefixes = true;
+      const MemoryReclaimResult result = nativeLoop_->reclaimMemory(directive);
+      const bool progressed = nativeLoop_->tick();
+      Cache &cache = resources_->cache();
+      if (result.outcome != ReclaimOutcome::Pending && !progressed &&
+          !cache.transfersInFlight() && !nativeLoop_->commandInFlight() &&
+          !cache.releasePending()) {
+        complete = true;
+        break;
+      }
+      if (std::chrono::steady_clock::now() >= deadline)
+        break;
+      if (!progressed)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  } catch (const std::exception &error) {
+    // What reached the disk is still saved; the rest stays in RAM and goes.
+    return std::string("cache flush stopped (") + error.what() + "); saving what is on disk";
+  }
+  const CacheImage image = resources_->cache().exportDisk(resources_->stateStorage());
+  std::string error;
+  if (!directory->save(image, error))
+    return "cache index not saved: " + error;
+  return "saved " + std::to_string(image.states.size()) + " states on " +
+         std::to_string(image.blocks.size()) + " KV blocks" +
+         (complete ? "" : " before the time budget ran out");
 }
 
 RuntimeBootstrapReport RuntimeBootstrap::requireWarmupAndAnnounce(

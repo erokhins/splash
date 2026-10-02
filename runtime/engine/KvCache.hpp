@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -159,6 +160,27 @@ public:
   void erase(uint64_t blockId);
 
   [[nodiscard]] Snapshot snapshot() const noexcept;
+
+  // Persistence. A disk-only block as a saved index records it, under a
+  // parent that may be disk-only itself; a key the cache already holds is
+  // an inconsistent index.
+  [[nodiscard]] uint64_t insertDisk(uint64_t parentBlock, std::span<const uint32_t> tokens,
+                                    ImageIdentity images,
+                                    std::shared_ptr<model::KvDiskSlot> slot, bool hadState);
+  struct BlockView final {
+    uint64_t id = 0;
+    uint64_t parent = 0;
+    std::span<const uint32_t> tokens;
+    ImageIdentity images;
+    // Null without a disk copy.
+    const model::KvDiskSlot *slot = nullptr;
+    bool resident = false;
+    bool transferring = false;
+    bool poisoned = false;
+    bool hadState = false;
+  };
+  // Every block, parents before children.
+  void visit(const std::function<void(const BlockView &)> &visitor) const;
 
 private:
   struct Block {

@@ -371,6 +371,30 @@ StateEviction StateCache::erase(uint64_t kvBlock, bool retirement) noexcept {
   return {true, reclaimed};
 }
 
+void StateCache::adoptDisk(uint64_t kvBlock, std::shared_ptr<const CompositeState> state,
+                           bool checkpoint) {
+  if (!state || !state->bytes() || state->residentBytes())
+    throw std::invalid_argument("an adopted state is a disk copy");
+  if (!kv_.contains(kvBlock))
+    throw std::invalid_argument("composite state KV block is unknown");
+  if (entries_.contains(kvBlock))
+    throw std::logic_error("duplicate composite state key");
+  if (publications_ == std::numeric_limits<uint64_t>::max())
+    throw std::overflow_error("composite state publication count overflowed");
+  Entry &entry = publicationEntry(kvBlock, checkpoint);
+  entry.disk = std::move(state);
+  diskBytes_ += entry.disk->bytes();
+  entry.lastUsed = recency_.next();
+  reindex(kvBlock, entry);
+  ++publications_;
+}
+
+void StateCache::visit(const std::function<void(const EntryView &)> &visitor) const {
+  for (const auto &[kvBlock, entry] : entries_)
+    visitor({kvBlock, entry.disk.get(), entry.ram != nullptr, entry.checkpoint,
+             !entry.invalid && !entry.pins && !writing(kvBlock), entry.lastUsed});
+}
+
 StateCacheSnapshot StateCache::snapshot() const noexcept {
   StateCacheSnapshot result;
   result.entries = static_cast<uint32_t>(std::min<uint64_t>(

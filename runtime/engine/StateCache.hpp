@@ -174,6 +174,21 @@ public:
   [[nodiscard]] bool pollOffload();
   [[nodiscard]] StateCacheSnapshot snapshot() const noexcept;
 
+  // Persistence. A disk copy as a saved index records it, on a block that
+  // holds no state yet.
+  void adoptDisk(uint64_t kvBlock, std::shared_ptr<const CompositeState> state,
+                 bool checkpoint);
+  struct EntryView final {
+    uint64_t kvBlock = 0;
+    const CompositeState *disk = nullptr;
+    bool resident = false;
+    bool checkpoint = false;
+    // Invalid, pinned or being written: not a copy to record.
+    bool settled = false;
+    uint64_t lastUsed = 0;
+  };
+  void visit(const std::function<void(const EntryView &)> &visitor) const;
+
 private:
   friend class CompositeStateLease;
 

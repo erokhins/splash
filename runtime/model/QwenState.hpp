@@ -222,6 +222,13 @@ public:
   [[nodiscard]] uint64_t actualAllocatedBytes() const noexcept override {
     return allocations_->bytes.load(std::memory_order_relaxed);
   }
+  // Persistence: a disk copy's record is its slot and logical lengths, and
+  // an adopted record becomes a disk-only state once its lengths pass the
+  // snapshot validation.
+  [[nodiscard]] std::optional<PersistedState>
+  persisted(const CompositeState &state) const override;
+  [[nodiscard]] std::vector<std::shared_ptr<const CompositeState>>
+  adoptPersisted(std::span<const PersistedState> records) override;
   [[nodiscard]] uint64_t actualSlotBytes(uint32_t slot) const;
   [[nodiscard]] CompositeStateLayout layout() const noexcept { return layout_; }
 

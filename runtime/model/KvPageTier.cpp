@@ -117,6 +117,23 @@ std::shared_ptr<KvDiskSlot> KvPageTier::acquireSlot() {
   return std::make_shared<DiskSlot>(std::move(slot));
 }
 
+uint32_t KvPageTier::slotIndex(const KvDiskSlot &slot) const {
+  const auto *disk = dynamic_cast<const DiskSlot *>(&slot);
+  if (!disk || !disk->slot)
+    throw std::invalid_argument("KV disk slot does not belong to this tier");
+  return disk->slot->index();
+}
+
+std::vector<std::shared_ptr<KvDiskSlot>> KvPageTier::adoptSlots(std::span<const uint32_t> indices) {
+  std::vector<std::shared_ptr<KvDiskSlot>> result;
+  auto slots = file_->adopt(indices);
+  if (slots.empty()) return result;
+  result.reserve(slots.size());
+  for (auto &slot : slots)
+    result.push_back(std::make_shared<DiskSlot>(std::move(slot)));
+  return result;
+}
+
 std::span<std::byte> KvPageTier::staging(uint32_t slot) noexcept {
   return {memory_.get() + uint64_t{slot} * slotBytes_, slotBytes_};
 }

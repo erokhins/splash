@@ -77,6 +77,11 @@ struct KvTierSnapshot final {
   uint32_t pendingPages = 0;
   uint32_t diskBlocks = 0;
   uint64_t diskBytes = 0;
+  // The tier's files outlive the process, and what the saved index of the
+  // previous run put back at startup.
+  bool persistent = false;
+  uint32_t restoredBlocks = 0;
+  uint32_t restoredStates = 0;
 };
 
 struct CacheSnapshot final {
@@ -114,6 +119,28 @@ struct CacheReclaimResult final {
 };
 
 enum class CacheReclaimMode { ReuseBacking, ReleaseBacking };
+
+// The disk tier's contents as a saved index records them: the chains of
+// disk-only KV blocks that lead to a state, and the states on them. Blocks
+// come parents first; states come oldest first, so adopting them in order
+// restores their replacement order.
+struct CacheImage final {
+  struct Block final {
+    uint64_t id = 0;
+    uint64_t parent = 0;
+    std::array<uint32_t, KvCache::pageTokens> tokens{};
+    ImageIdentity images;
+    uint32_t slot = 0;
+    bool hadState = false;
+  };
+  struct State final {
+    uint64_t block = 0;
+    model::PersistedState persisted;
+    bool checkpoint = false;
+  };
+  std::vector<Block> blocks;
+  std::vector<State> states;
+};
 
 // KV restores a request waits for before it can run.
 enum class KvRestoreStatus : uint8_t { None, Pending, Failed };
@@ -241,6 +268,17 @@ public:
   // keeping one runway extent. Waits for each paced release.
   void releaseUnusedKvBacking();
   [[nodiscard]] CacheSnapshot snapshot() const;
+
+  // Persistence. The image holds every settled disk state whose chain is
+  // on disk from the root, with those chains; nothing else survives a
+  // restart. Importing adopts the image's slots from the tier and the state
+  // storage, all or nothing: false when either cannot hold them. An image
+  // that contradicts itself or the cache throws, possibly after adding part
+  // of it; what was added is a valid cache either way.
+  [[nodiscard]] CacheImage exportDisk(const model::StateStorage &states) const;
+  [[nodiscard]] bool importDisk(const CacheImage &image, model::StateStorage &states);
+  // The tier's files outlive the process; for the status report.
+  void markPersistent() noexcept { kvTier_.persistent = true; }
 
 private:
   [[nodiscard]] std::vector<uint64_t>

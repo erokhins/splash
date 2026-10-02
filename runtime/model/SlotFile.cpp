@@ -44,13 +44,42 @@ bool SlotFile::Operation::wait() {
   return success_;
 }
 
+namespace {
+int createUnlinked(const std::filesystem::path &directory) {
+  std::string name = (directory / "splash-cache-XXXXXX").string();
+  const int descriptor = ::mkstemp(name.data());
+  if (descriptor < 0)
+    throw std::system_error(errno, std::generic_category(), "create slot file");
+  if (::unlink(name.c_str()) < 0) {
+    const int error = errno;
+    ::close(descriptor);
+    throw std::system_error(error, std::generic_category(), "unlink slot file");
+  }
+  return descriptor;
+}
+} // namespace
+
 SlotFile::SlotFile(uint64_t slotBytes, uint64_t capacityBytes,
                    const std::filesystem::path &directory)
     : SlotFile(slotBytes, std::make_shared<DiskBudget>(capacityBytes), directory) {}
 
 SlotFile::SlotFile(uint64_t slotBytes, std::shared_ptr<DiskBudget> budget,
                    const std::filesystem::path &directory)
+    : SlotFile(slotBytes, std::move(budget), createUnlinked(directory)) {}
+
+std::unique_ptr<SlotFile> SlotFile::persistent(uint64_t slotBytes,
+                                               std::shared_ptr<DiskBudget> budget,
+                                               const std::filesystem::path &file) {
+  const int descriptor = ::open(file.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+  if (descriptor < 0)
+    throw std::system_error(errno, std::generic_category(), "open slot file");
+  return std::unique_ptr<SlotFile>(new SlotFile(slotBytes, std::move(budget), descriptor));
+}
+
+SlotFile::SlotFile(uint64_t slotBytes, std::shared_ptr<DiskBudget> budget, int descriptor)
     : backing_(std::make_shared<Backing>()) {
+  // The backing closes the descriptor whatever happens below.
+  backing_->descriptor = descriptor;
   if (!budget)
     throw std::invalid_argument("slot file needs a disk budget");
   const uint64_t capacityBytes = budget->capacityBytes();
@@ -71,13 +100,6 @@ SlotFile::SlotFile(uint64_t slotBytes, std::shared_ptr<DiskBudget> budget,
   struct sigaction fileSize {};
   if (::sigaction(SIGXFSZ, nullptr, &fileSize) == 0 && fileSize.sa_handler == SIG_DFL)
     std::signal(SIGXFSZ, SIG_IGN);
-  std::string name = (directory / "splash-cache-XXXXXX").string();
-  backing_->descriptor = ::mkstemp(name.data());
-  if (backing_->descriptor < 0)
-    throw std::system_error(errno, std::generic_category(), "create slot file");
-  const int unlinked = ::unlink(name.c_str());
-  if (unlinked < 0)
-    throw std::system_error(errno, std::generic_category(), "unlink slot file");
   if (::fcntl(backing_->descriptor, F_SETFD, FD_CLOEXEC) < 0)
     throw std::system_error(errno, std::generic_category(), "close-on-exec slot file");
   // Avoid turning the cold tier into another long-lived RAM copy. Host VM
@@ -115,6 +137,53 @@ std::shared_ptr<SlotFile::Slot> SlotFile::acquire() {
   slot->backing_ = backing_;
   slot->index_ = index;
   return slot;
+}
+
+std::vector<std::shared_ptr<SlotFile::Slot>> SlotFile::adopt(std::span<const uint32_t> indices) {
+  for (size_t i = 1; i < indices.size(); ++i)
+    if (indices[i] <= indices[i - 1])
+      throw std::invalid_argument("adopted slots must ascend without repeats");
+  const uint64_t slotBytes = backing_->slotBytes;
+  if (!indices.empty() &&
+      (indices.back() == std::numeric_limits<uint32_t>::max() ||
+       (uint64_t{indices.back()} + 1) > uint64_t{std::numeric_limits<off_t>::max()} / slotBytes))
+    throw std::invalid_argument("adopted slot lies beyond any file");
+  // Everything that can fail to allocate happens before the file changes. A
+  // slot without backing is inert: its destructor returns nothing.
+  std::vector<std::shared_ptr<Slot>> slots;
+  slots.reserve(indices.size());
+  for (size_t i = 0; i < indices.size(); ++i)
+    slots.push_back(std::shared_ptr<Slot>(new Slot({}, 0)));
+  std::vector<uint32_t> gaps;
+  uint32_t next = 0;
+  for (uint32_t index : indices) {
+    for (; next < index; ++next)
+      gaps.push_back(next);
+    next = index + 1;
+  }
+  std::lock_guard lock(backing_->mutex);
+  if (backing_->allocated || !backing_->free.empty())
+    throw std::logic_error("slots are adopted before any is handed out");
+  if (!backing_->budget->reserve(indices.size() * slotBytes))
+    return {};
+  for (size_t i = 0; i < indices.size(); ++i) {
+    slots[i]->backing_ = backing_;
+    slots[i]->index_ = indices[i];
+    slots[i]->written_ = true;
+  }
+  backing_->free = std::move(gaps);
+  backing_->allocated = next;
+  // A shorter run leaves no stale tail behind; a failure here costs only
+  // disk space.
+  static_cast<void>(::ftruncate(backing_->descriptor, static_cast<off_t>(next * slotBytes)));
+  return slots;
+}
+
+std::shared_ptr<SlotFile::Operation> SlotFile::flush() {
+  return submit([backing = backing_](const std::atomic<bool> &) {
+    return ::fcntl(backing->descriptor, F_FULLFSYNC) >= 0 ||
+           ::fsync(backing->descriptor) == 0;
+  }, {});
 }
 
 uint64_t SlotFile::slotBytes() const noexcept { return backing_->slotBytes; }

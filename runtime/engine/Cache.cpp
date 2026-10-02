@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <utility>
 
@@ -788,6 +789,136 @@ bool Cache::pollTransfers() {
   if (progressed)
     dropPoisoned();
   return progressed;
+}
+
+CacheImage Cache::exportDisk(const model::StateStorage &storage) const {
+  CacheImage image;
+  if (!tier_)
+    return image;
+  // A chain is restorable only when every block of it has a disk copy.
+  std::unordered_map<uint64_t, bool> onDisk;
+  kv_.visit([&](const KvCache::BlockView &block) {
+    const bool chained = !block.parent || onDisk.at(block.parent);
+    onDisk.emplace(block.id, chained && block.slot && !block.transferring && !block.poisoned);
+  });
+  struct Candidate {
+    CacheImage::State state;
+    uint64_t lastUsed;
+  };
+  std::vector<Candidate> candidates;
+  std::unordered_map<uint64_t, bool> needed;
+  states_.visit([&](const StateCache::EntryView &entry) {
+    if (!entry.disk || !entry.settled || !onDisk.at(entry.kvBlock))
+      return;
+    const auto persisted = storage.persisted(*entry.disk);
+    if (!persisted)
+      return;
+    candidates.push_back({{entry.kvBlock, *persisted, entry.checkpoint}, entry.lastUsed});
+    needed[entry.kvBlock] = true;
+  });
+  std::sort(candidates.begin(), candidates.end(),
+            [](const Candidate &left, const Candidate &right) {
+              return left.lastUsed != right.lastUsed ? left.lastUsed < right.lastUsed
+                                                     : left.state.block < right.state.block;
+            });
+  for (const Candidate &candidate : candidates)
+    image.states.push_back(candidate.state);
+  // The chains those states restore through, parents first.
+  std::vector<uint64_t> order;
+  for (const auto &[block, _] : needed)
+    order.push_back(block);
+  for (uint64_t block : order)
+    for (uint64_t id : kv_.chain(block).blocks)
+      needed[id] = true;
+  kv_.visit([&](const KvCache::BlockView &block) {
+    if (!needed.contains(block.id))
+      return;
+    CacheImage::Block saved;
+    saved.id = block.id;
+    saved.parent = block.parent;
+    std::copy(block.tokens.begin(), block.tokens.end(), saved.tokens.begin());
+    saved.images = block.images;
+    saved.slot = tier_->slotIndex(*block.slot);
+    saved.hadState = block.hadState;
+    image.blocks.push_back(saved);
+  });
+  return image;
+}
+
+bool Cache::importDisk(const CacheImage &image, model::StateStorage &storage) {
+  if (!tier_)
+    throw std::logic_error("a cache image needs a disk tier");
+  // Validate the image before adopting anything: ids ascend, parents come
+  // first, slots repeat nowhere, and every state sits on a block of it.
+  std::unordered_map<uint64_t, size_t> positions;
+  std::vector<uint32_t> kvSlots;
+  kvSlots.reserve(image.blocks.size());
+  for (size_t index = 0; index < image.blocks.size(); ++index) {
+    const CacheImage::Block &block = image.blocks[index];
+    if (!block.id || (index && block.id <= image.blocks[index - 1].id))
+      throw std::invalid_argument("cache image blocks are out of order");
+    if (block.parent && !positions.contains(block.parent))
+      throw std::invalid_argument("cache image block precedes its parent");
+    positions.emplace(block.id, index);
+    kvSlots.push_back(block.slot);
+  }
+  std::vector<size_t> kvOrder(kvSlots.size());
+  std::iota(kvOrder.begin(), kvOrder.end(), size_t{0});
+  std::sort(kvOrder.begin(), kvOrder.end(),
+            [&](size_t left, size_t right) { return kvSlots[left] < kvSlots[right]; });
+  std::vector<uint32_t> sortedKvSlots;
+  sortedKvSlots.reserve(kvOrder.size());
+  for (size_t index : kvOrder) {
+    if (!sortedKvSlots.empty() && sortedKvSlots.back() == kvSlots[index])
+      throw std::invalid_argument("cache image repeats a KV slot");
+    sortedKvSlots.push_back(kvSlots[index]);
+  }
+  std::vector<size_t> stateOrder(image.states.size());
+  std::iota(stateOrder.begin(), stateOrder.end(), size_t{0});
+  std::sort(stateOrder.begin(), stateOrder.end(), [&](size_t left, size_t right) {
+    return image.states[left].persisted.slot < image.states[right].persisted.slot;
+  });
+  std::vector<model::PersistedState> records;
+  std::unordered_map<uint64_t, bool> stateBlocks;
+  records.reserve(stateOrder.size());
+  for (size_t index : stateOrder) {
+    const CacheImage::State &state = image.states[index];
+    if (!positions.contains(state.block) || !stateBlocks.emplace(state.block, true).second)
+      throw std::invalid_argument("cache image state is not on one block of it");
+    if (!records.empty() && records.back().slot == state.persisted.slot)
+      throw std::invalid_argument("cache image repeats a state slot");
+    records.push_back(state.persisted);
+  }
+  // All or nothing: both adoptions succeed before the cache changes.
+  std::vector<std::shared_ptr<model::KvDiskSlot>> adoptedKv;
+  if (!sortedKvSlots.empty()) {
+    adoptedKv = tier_->adoptSlots(sortedKvSlots);
+    if (adoptedKv.size() != sortedKvSlots.size())
+      return false;
+  }
+  std::vector<std::shared_ptr<const CompositeState>> adoptedStates;
+  if (!records.empty()) {
+    adoptedStates = storage.adoptPersisted(records);
+    if (adoptedStates.size() != records.size())
+      return false;
+  }
+  std::vector<std::shared_ptr<model::KvDiskSlot>> slotOf(image.blocks.size());
+  for (size_t rank = 0; rank < kvOrder.size(); ++rank)
+    slotOf[kvOrder[rank]] = std::move(adoptedKv[rank]);
+  std::unordered_map<uint64_t, uint64_t> ids;
+  for (size_t index = 0; index < image.blocks.size(); ++index) {
+    const CacheImage::Block &block = image.blocks[index];
+    const uint64_t parent = block.parent ? ids.at(block.parent) : 0;
+    ids.emplace(block.id, kv_.insertDisk(parent, block.tokens, block.images,
+                                         std::move(slotOf[index]), block.hadState));
+  }
+  for (size_t rank = 0; rank < stateOrder.size(); ++rank) {
+    const CacheImage::State &state = image.states[stateOrder[rank]];
+    states_.adoptDisk(ids.at(state.block), std::move(adoptedStates[rank]), state.checkpoint);
+  }
+  kvTier_.restoredBlocks += static_cast<uint32_t>(image.blocks.size());
+  kvTier_.restoredStates += static_cast<uint32_t>(image.states.size());
+  return true;
 }
 
 CacheSnapshot Cache::snapshot() const {

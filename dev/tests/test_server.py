@@ -3396,6 +3396,19 @@ class ServerTest(unittest.TestCase):
             api._native_command(disk_bf16_args)[-3:],
             [str(5 * 1024**3), "--kv-format", "bf16"],
         )
+        # The cache directory persists the tier, so it rides only with one.
+        self.assertIsNone(args.cache_dir)
+        persistent_args = api.parse_args(
+            [*required, "--max-cache-disk", "5G", "--cache-dir", "/data/runtime/cache"]
+        )
+        self.assertEqual(
+            api._native_command(persistent_args)[-3:],
+            [str(5 * 1024**3), "--cache-dir", "/data/runtime/cache"],
+        )
+        self.assertNotIn(
+            "--cache-dir",
+            api._native_command(api.parse_args([*required, "--cache-dir", "/data"])),
+        )
         with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
             api.parse_args([*required, "--kv-format", "fp16"])
         self.assertEqual(

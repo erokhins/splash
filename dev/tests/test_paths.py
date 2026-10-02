@@ -24,6 +24,7 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(layout.profiles, data / "runtime")
         self.assertEqual(layout.weights, data / "weights")
         self.assertEqual(layout.hub_cache, data / "huggingface")
+        self.assertEqual(layout.cache, data / "runtime/cache")
         with mock.patch.dict(
             os.environ,
             {paths.DATA_VARIABLE: str(self.root / "env"), "HOME": str(self.root)},
@@ -40,6 +41,7 @@ class LayoutTest(unittest.TestCase):
             self.assertEqual(layout.data, paths.ROOT)
             self.assertEqual(layout.models, paths.ROOT / "install/models")
             self.assertEqual(layout.runtime, paths.ROOT / "build/runtime")
+            self.assertEqual(layout.cache, paths.ROOT / "build/runtime/cache")
             self.assertEqual(layout.profiles, paths.ROOT / "install/profiles")
             with mock.patch.object(paths, "PACKAGED", True):
                 release = Path.home() / "Library/Application Support/Splash"

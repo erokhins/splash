@@ -199,6 +199,9 @@ std::string runtimeStatusJson(
       << ",\"kv_restores\":" << resources.kvTier.restores
       << ",\"kv_restore_failures\":" << resources.kvTier.restoreFailures
       << ",\"kv_pending_pages\":" << resources.kvTier.pendingPages
+      << ",\"persistent\":" << (resources.kvTier.persistent ? "true" : "false")
+      << ",\"restored_kv_blocks\":" << resources.kvTier.restoredBlocks
+      << ",\"restored_states\":" << resources.kvTier.restoredStates
       << "}"
       << ",\"cache\":{\"lookups\":" << lookup.lookups
       << ",\"hits\":" << core.cacheHits

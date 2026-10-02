@@ -249,6 +249,11 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(
                     argv[argv.index("--max-cache-disk") + 1], str(5 * 1024**3)
                 )
+                # The SSD cache persists under the data directory in effect.
+                self.assertEqual(
+                    argv[argv.index("--cache-dir") + 1],
+                    str(launcher.paths.layout().cache),
+                )
                 self.assertEqual(
                     argv[-4:],
                     ["--allowed-host", "splash.local", "--allowed-host", "proxy.local"],

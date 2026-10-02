@@ -1,6 +1,7 @@
 #include "TestKvPool.hpp"
 #include "TestKvTier.hpp"
 #include "engine/Cache.hpp"
+#include "engine/CachePersistence.hpp"
 #include "model/SlotFile.hpp"
 
 #include <algorithm>
@@ -9,6 +10,8 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -37,6 +40,8 @@ struct TransferControl {
   bool success = true;
   uint32_t slots = 0;
   uint32_t capacity = 2;
+  // Each disk copy takes the next position of the state file.
+  uint32_t nextSlot = 0;
 };
 
 // A write the tier admits while the quota has a slot; its disk copy holds
@@ -45,8 +50,15 @@ std::unique_ptr<StateOffload> writeState(const std::shared_ptr<TransferControl> 
 
 class TieredState final : public CompositeState {
 public:
-  TieredState(std::shared_ptr<TransferControl> control, bool disk = false)
-      : control_(std::move(control)), disk_(disk) { if (disk_) ++control_->slots; }
+  static constexpr uint32_t kNextSlot = std::numeric_limits<uint32_t>::max();
+  TieredState(std::shared_ptr<TransferControl> control, bool disk = false,
+              uint32_t slot = kNextSlot)
+      : control_(std::move(control)), disk_(disk) {
+    if (disk_) {
+      ++control_->slots;
+      slot_ = slot == kNextSlot ? control_->nextSlot++ : slot;
+    }
+  }
   ~TieredState() override { if (disk_) --control_->slots; }
   uint64_t bytes() const noexcept override { return 100; }
   uint64_t residentBytes() const noexcept override { return disk_ ? 0 : bytes(); }
@@ -54,10 +66,52 @@ public:
   std::unique_ptr<StateOffload> offload(std::function<void()>) const override {
     return writeState(control_);
   }
+  uint32_t slot() const noexcept { return slot_; }
 private:
   std::shared_ptr<TransferControl> control_;
   bool disk_;
+  uint32_t slot_ = 0;
 };
+
+// Records disk copies by their slot and a fixed description of the state.
+class TestStateStorage final : public model::StateStorage {
+public:
+  static constexpr std::array<uint64_t, 4> kMetadata{7, 8, 9, 10};
+  explicit TestStateStorage(std::shared_ptr<TransferControl> control)
+      : control_(std::move(control)) {}
+  uint64_t actualAllocatedBytes() const noexcept override { return 0; }
+  uint64_t releaseIdle(uint32_t, uint32_t) noexcept override { return 0; }
+  std::optional<model::PersistedState> persisted(const CompositeState &state) const override {
+    const auto *tiered = dynamic_cast<const TieredState *>(&state);
+    if (!tiered || tiered->residentBytes())
+      return std::nullopt;
+    return model::PersistedState{tiered->slot(), kMetadata};
+  }
+  std::vector<std::shared_ptr<const CompositeState>>
+  adoptPersisted(std::span<const model::PersistedState> records) override {
+    std::vector<std::shared_ptr<const CompositeState>> result;
+    if (control_->slots + records.size() > control_->capacity)
+      return result;
+    for (const model::PersistedState &record : records) {
+      if (record.metadata != kMetadata)
+        throw std::invalid_argument("state record of another model");
+      result.push_back(std::make_shared<TieredState>(control_, true, record.slot));
+    }
+    return result;
+  }
+
+private:
+  std::shared_ptr<TransferControl> control_;
+};
+
+template <typename Exception, typename Call> bool raises(Call call) {
+  try {
+    call();
+  } catch (const Exception &) {
+    return true;
+  }
+  return false;
+}
 
 std::unique_ptr<StateOffload> writeState(const std::shared_ptr<TransferControl> &control) {
   if (control->slots >= control->capacity) return {};
@@ -837,6 +891,128 @@ void publishReusable(CacheFixture &fixture, uint64_t block,
   fixture.cache.publishCompositeState(block, std::move(state));
   const auto index = std::find(fixture.blocks.begin(), fixture.blocks.end(), block) - fixture.blocks.begin();
   recordUse(fixture, static_cast<uint32_t>((index + 1) * 32 + 1));
+}
+
+// What the tier holds at shutdown comes back at the next start: the image
+// names the disk chains and their states, survives its encoding, follows
+// the quota, and rebuilds a cache a request restores from.
+void testPersistedImageRoundTrip() {
+  auto control = std::make_shared<TransferControl>();
+  control->ready = true;
+  control->capacity = 4;
+  TestStateStorage storage(control);
+  std::vector<uint32_t> prompt;
+  CacheImage image;
+  {
+    test::TestKvTier tier;
+    tier.capacity = 8;
+    CacheFixture fixture(&tier);
+    prompt = fixture.prompt;
+    publishReusable(fixture, fixture.blocks[3], std::make_shared<TieredState>(control));
+    // A RAM-only state leaves nothing to save until the chain is on disk.
+    require(fixture.cache.exportDisk(storage).states.empty(),
+            "a RAM state was saved without a disk copy");
+    // Shutdown evicts everything through the tier.
+    while (fixture.cache.reclaimOne(CacheReclaimMode::ReuseBacking).madeProgress) {
+      tier.complete();
+      static_cast<void>(fixture.cache.pollTransfers());
+    }
+    const auto before = fixture.cache.snapshot();
+    require(before.kvCache.diskBlocks == 4 && before.kvCache.blocks == 0 &&
+                before.stateCache.diskBytes == 100 && before.stateCache.bytes == 0,
+            "fixture did not move to disk");
+    image = fixture.cache.exportDisk(storage);
+    require(image.states.size() == 1 && image.blocks.size() == 4,
+            "image missed the disk chain");
+    require(image.states[0].block == image.blocks[3].id &&
+                image.states[0].persisted.metadata == TestStateStorage::kMetadata &&
+                !image.states[0].checkpoint,
+            "image recorded the wrong state");
+    require(image.blocks[0].parent == 0 && image.blocks[1].parent == image.blocks[0].id &&
+                image.blocks[3].parent == image.blocks[2].id &&
+                std::equal(image.blocks[2].tokens.begin(), image.blocks[2].tokens.end(),
+                           prompt.begin() + 2 * KvCache::pageTokens),
+            "image chain is out of order or holds the wrong tokens");
+  }
+  require(control->slots == 0, "the first cache leaked its disk states");
+
+  const CacheIndexHeader header{cacheNamespace(), 100, 100};
+  const std::vector<std::byte> bytes = encodeCacheIndex(header, image);
+  const auto decoded = decodeCacheIndex(header, bytes);
+  require(decoded && decoded->blocks.size() == 4 && decoded->states.size() == 1 &&
+              decoded->blocks[2].tokens == image.blocks[2].tokens &&
+              decoded->blocks[2].slot == image.blocks[2].slot &&
+              decoded->blocks[2].images == image.blocks[2].images &&
+              decoded->states[0].persisted == image.states[0].persisted,
+          "index did not round-trip");
+  std::vector<std::byte> damaged = bytes;
+  damaged[damaged.size() / 2] ^= std::byte{1};
+  CacheIndexHeader other = header;
+  other.kvSlotBytes = 200;
+  require(!decodeCacheIndex(header, damaged) && !decodeCacheIndex(other, bytes) &&
+              !decodeCacheIndex(header, std::span(bytes).first(bytes.size() - 1)),
+          "a damaged, foreign or cut index was accepted");
+  // The state and its four blocks need 500 bytes of quota.
+  require(trimCacheImage(image, 100, 100, 500).states.size() == 1 &&
+              trimCacheImage(image, 100, 100, 499).states.empty() &&
+              trimCacheImage(image, 100, 100, 499).blocks.empty(),
+          "trimming did not follow the quota");
+  require(cacheImageFitsFiles(image, 100, 400, 100, 100) &&
+              !cacheImageFitsFiles(image, 100, 399, 100, 100) &&
+              !cacheImageFitsFiles(image, 100, 400, 100, 99),
+          "an index naming slots beyond its files was accepted");
+
+  {
+    test::TestKvTier tier;
+    tier.capacity = 8;
+    test::TestKvBacking backing{4, 100};
+    KvPool pool{backing};
+    engine::Cache cache(pool, cacheNamespace(), &tier);
+    require(cache.importDisk(*decoded, storage), "import was refused");
+    const auto after = cache.snapshot();
+    require(after.kvCache.diskBlocks == 4 && after.kvCache.blocks == 0 &&
+                after.stateCache.entries == 1 && after.stateCache.diskBytes == 100 &&
+                after.kvTier.restoredBlocks == 4 && after.kvTier.restoredStates == 1 &&
+                tier.slots == 4 && control->slots == 1,
+            "import did not rebuild the disk tier");
+    require(cache.probe(prompt).cachedTokens() == 128, "restored prefix is not probed");
+    auto lookup = cache.lookup(prompt);
+    require(lookup.kvBoundary == 128 && lookup.resumeBoundary() == 128 && lookup.state &&
+                !lookup.state->state()->residentBytes(),
+            "restored prefix was not found");
+    cache.beginRequest(1);
+    require(cache.restoreRequest(1, lookup).granted() &&
+                cache.kvRestoreStatus(1) == KvRestoreStatus::Pending,
+            "restore of the imported chain was not started");
+    lookup = {};
+    for (int round = 0; round < 8 && cache.kvRestoreStatus(1) == KvRestoreStatus::Pending; ++round) {
+      tier.complete();
+      static_cast<void>(cache.pollTransfers());
+    }
+    require(cache.kvRestoreStatus(1) == KvRestoreStatus::None && tier.restores == 4,
+            "imported chain did not restore from disk");
+    cache.endRequest(1);
+    // The same image again contradicts the cache; a repeated slot
+    // contradicts itself before anything is adopted.
+    require(raises<std::invalid_argument>([&] { static_cast<void>(cache.importDisk(*decoded, storage)); }),
+            "a second import of the same chain was accepted");
+    CacheImage repeated = *decoded;
+    repeated.blocks[1].slot = repeated.blocks[0].slot;
+    require(raises<std::invalid_argument>([&] { static_cast<void>(cache.importDisk(repeated, storage)); }) &&
+                tier.slots == 4 && control->slots == 1,
+            "an image repeating a slot changed the cache");
+  }
+  {
+    // A quota below the image takes nothing.
+    test::TestKvTier tier;
+    tier.capacity = 3;
+    test::TestKvBacking backing{4, 100};
+    KvPool pool{backing};
+    engine::Cache cache(pool, cacheNamespace(), &tier);
+    require(!cache.importDisk(*decoded, storage) && tier.slots == 0 && control->slots == 0 &&
+                cache.snapshot().kvCache.diskBlocks == 0,
+            "an import the quota refused changed the cache");
+  }
 }
 
 void testTieredStateLifecycle() {
@@ -2509,6 +2685,7 @@ int main() {
     testDemotionFreesTheBufferAtOnce();
     testTierOnlyAddsToTierOff();
     testDiskPromotionAndInvalidation();
+    testPersistedImageRoundTrip();
     testTieredStateLifecycle();
     testTieredWriteReuseAndFailure();
     testCheckpointLookupProbeDoesNotPromote();
