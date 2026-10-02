@@ -938,7 +938,13 @@ void testPersistedImageRoundTrip() {
 
   const CacheIndexHeader header{cacheNamespace(), 100, 100};
   const std::vector<std::byte> bytes = encodeCacheIndex(header, image);
-  const auto decoded = decodeCacheIndex(header, bytes);
+  // Another run holds its header elsewhere in memory and reads the same bytes.
+  const CacheIndexHeader sameHeader{cacheNamespace(), 100, 100};
+  require(encodeCacheIndex(sameHeader, image) == bytes &&
+              bytes.size() == 72 + 16 + 4 * (8 + 8 + 4 * KvCache::pageTokens + 8 + 8 + 4 + 1) +
+                                  (8 + 4 + 32 + 1) + 32,
+          "index bytes depend on more than their content");
+  const auto decoded = decodeCacheIndex(sameHeader, bytes);
   require(decoded && decoded->blocks.size() == 4 && decoded->states.size() == 1 &&
               decoded->blocks[2].tokens == image.blocks[2].tokens &&
               decoded->blocks[2].slot == image.blocks[2].slot &&

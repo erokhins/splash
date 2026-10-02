@@ -32,12 +32,14 @@ constexpr std::string_view kOpenName = "open";
 
 class Writer final {
 public:
-  template <typename T> void put(T value) {
-    static_assert(std::is_trivially_copyable_v<T>);
+  // Integers only: a span would serialize as its pointer and size.
+  template <typename T>
+    requires std::is_integral_v<T>
+  void put(T value) {
     const auto *begin = reinterpret_cast<const std::byte *>(&value);
     bytes_.insert(bytes_.end(), begin, begin + sizeof value);
   }
-  void put(std::span<const std::byte> bytes) {
+  void putBytes(std::span<const std::byte> bytes) {
     bytes_.insert(bytes_.end(), bytes.begin(), bytes.end());
   }
   [[nodiscard]] std::span<const std::byte> written() const noexcept { return bytes_; }
@@ -82,9 +84,9 @@ std::array<std::byte, CC_SHA256_DIGEST_LENGTH> sha256(std::span<const std::byte>
 }
 
 void putHeader(Writer &writer, const CacheIndexHeader &header) {
-  writer.put(std::as_bytes(std::span(kMagic)));
+  writer.putBytes(std::as_bytes(std::span(kMagic)));
   writer.put(kVersion);
-  writer.put(std::as_bytes(std::span(header.cacheNamespace.digest)));
+  writer.putBytes(std::as_bytes(std::span(header.cacheNamespace.digest)));
   writer.put(header.kvSlotBytes);
   writer.put(header.stateSlotBytes);
   writer.put(uint32_t{KvCache::pageTokens});
@@ -149,7 +151,7 @@ std::vector<std::byte> encodeCacheIndex(const CacheIndexHeader &header, const Ca
     writer.put(uint8_t{state.checkpoint});
   }
   const auto digest = sha256(writer.written());
-  writer.put(std::span<const std::byte>(digest));
+  writer.putBytes(digest);
   return writer.take();
 }
 
