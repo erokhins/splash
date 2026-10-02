@@ -969,6 +969,40 @@ kept. `/status` reports `disk.persistent`, `disk.restored_kv_blocks` and
 `disk.restored_states`; the startup log names the directory and what it
 restored, and the exit log what it saved.
 
+**Stopping so the cache is saved.** The index is written only when the
+engine exits cleanly, so stop the server the ordinary way and let it finish:
+Ctrl-C in its terminal, `kill <pid>` (SIGTERM) or `kill -INT <pid>` of the
+`splash serve` process, or `pkill -INT -f server/server.py`. The server
+closes the engine's pipe and waits; the engine moves the cache to disk and
+logs `Cache disk tier: saved N states on M KV blocks.` before the process
+ends, which takes a few seconds for a few GB. `kill -9`, a crash or a
+power loss skips the save: the `open` marker remains and the next start
+discards the directory's index (`restored 0 states ... the previous run did
+not close it`) and starts the files over. Stopping within 15 s of a stop
+request is not guaranteed to save either, since the server then escalates
+to SIGKILL; a flush cut short by the 10 s budget still saves what reached
+the disk.
+
+**What the files hold, and their size.** KV blocks are content-addressed
+and shared: a request that starts with another's prompt reuses the same
+blocks and adds only its new tail, so the KV file grows with the longest
+prompt, not with the sum of prompts (a 31.7K-token session of 12 requests
+saved 991 blocks, 1.0 GB, however many requests shared the prefix). States
+are different: each is a complete snapshot of the recurrent state and the
+draft ring at one block boundary, 187 MiB for Qwen3.8-27B and 109 MiB for
+Qwen3.6-35B-A3B whatever its position, and each request publishes one at
+its final block. A conversation of N requests therefore keeps N states even
+when every request extends the previous one (the same 12-request session
+saved 12 states, 2.3 GB); one state costs the disk of roughly 6K tokens of
+KV. Intermediate states are what a request resumes from when it matches
+only part of a chain (a new task sharing the system prompt, a retry, an
+edited turn): the model cannot resume from cached KV without the state at
+that boundary, so without them such a request replays its prompt in full.
+They are kept deliberately; the quota bounds the total, replacing the
+oldest copies first, and the loader drops the oldest states that no longer
+fit a smaller quota. The RAM cache keeps the same states while the server
+runs; the disk mirrors its contents rather than adding a policy.
+
 The files hold request content in processed form and stay on disk between
 runs; a session that must leave nothing behind runs without the tier, or
 with `SPLASH_DATA` on a volume that is wiped afterwards.

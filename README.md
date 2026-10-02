@@ -93,7 +93,7 @@ window. To set your own limits or cache options, add these to `splash serve`:
 | `--data-dir DIR` | Keep installed models, caches and runtime state under one directory. |
 | `--kv-format bf16` | Use BF16 KV cache. Default: 8-bit (INT8). |
 | `--prefill-activations int8` | Prefill about 1.5× faster on M5 and later, with slightly different numerics. Default: bf16. |
-| `--max-cache-disk 16G` | Offload KV cache and GDN states to SSD as needed, and keep them across restarts. Off by default. |
+| `--max-cache-disk 16G` | Offload KV cache and GDN states to SSD as needed, and keep them across restarts (stop the server with Ctrl-C or SIGTERM, not `kill -9`, so it saves). Off by default. |
 
 On a Mac you also use for other work, `--max-memory` leaves room for other
 applications.
